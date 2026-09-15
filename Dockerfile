@@ -48,4 +48,4 @@ USER postgres
 ENV PGDATA=/var/lib/postgresql/pg_ros2
 COPY --chmod=755 scripts/start-postgres.sh /usr/local/bin/start-pg-ros2
 ENTRYPOINT ["/ros_entrypoint.sh", "/usr/local/bin/start-pg-ros2"]
-CMD ["postgres", "-c", "listen_addresses=*"]
+CMD ["postgres", "-c", "listen_addresses=*", "-c", "shared_preload_libraries=pg_ros2"]

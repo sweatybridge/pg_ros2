@@ -21,10 +21,12 @@ cargo pgrx package --pg-config /usr/lib/postgresql/18/bin/pg_config
 Run pgrx tests as an unprivileged OS user with write access to this **development**
 PostgreSQL installation's extension and library directories. The Docker test stage
 sets this up. Do not change ownership of a production installation for tests.
-The test suite checks SQL installation, local node discovery, repeated context
-creation/cleanup, topic queries, wait bounds, and privilege enforcement.
+The test suite checks atomic snapshot reconciliation, duplicate node names, multiple
+message types, unchanged snapshots, and persisted discovery errors. `scripts/smoke.sh`
+checks worker startup, automatic graph arrivals/removals, SQL failure rollback and
+recovery, reader privileges, extension reinstallation, and PostgreSQL restart.
 
-Use the release profile for tests and packages. rclrs 0.6.0 vendors some interfaces
+Use the release profile for tests and packages. rclrs 0.7.0 vendors some interfaces
 from newer ROS distributions (for example `SetLoggerLevelsResult`), whose native
 symbols do not exist in Humble. Release LTO removes these unused bindings from this
 graph-only extension. An unoptimized pgrx test build retains them and fails to load.
@@ -36,7 +38,9 @@ sourced Humble's `setup.bash`. That environment supplies `LD_LIBRARY_PATH`,
 `RMW_IMPLEMENTATION`. Set a writable `ROS_LOG_DIR` if the server user's home is not
 writable. A systemd service does not inherit your interactive shell's environment;
 use a service wrapper that sources the ROS setup before executing PostgreSQL.
-Do not add this extension to `shared_preload_libraries`.
+Add `pg_ros2` to `shared_preload_libraries`, set `pg_ros2.database` to the target
+database (default `postgres`), and restart the server. The Docker runtime enables
+preloading in its default command. Allow one slot in `max_worker_processes`.
 
 ## Export an installable package
 
@@ -54,23 +58,29 @@ After installation, run `CREATE EXTENSION pg_ros2` and the README queries.
 
 ## Execution model and limits
 
-ROS initialization occurs in the calling backend, never in the postmaster. ROS
-resources are local to each call. No Rust ROS callbacks invoke PostgreSQL APIs.
-Graph updates come from DDS middleware threads, so no executor spin is required.
-The discovery delay checks PostgreSQL interrupts every 10 ms; native ROS setup,
-graph calls, and teardown may still delay cancellation. The 2000 ms bound applies
-to the discovery wait, not total execution time.
+ROS initialization occurs only in the background worker, after PostgreSQL forks it.
+The postmaster only registers the worker and configuration. Client queries do not
+initialize ROS. One persistent node and executor live for the worker lifetime.
+The executor spins in bounded 100 ms intervals; callbacks only set an atomic flag.
+All SPI calls and transactions execute on the PostgreSQL worker thread.
 
-Graph functions are `VOLATILE`, `PARALLEL UNSAFE`, and strict for SQL NULL inputs.
-ROS errors become SQL errors after resources are released. Each query joins the
-configured DDS domain; transaction rollback cannot undo that external activity.
-Only superusers can invoke graph discovery, even if EXECUTE privileges are granted.
-Treat ROS peers and runtime library paths as part of the server's trust boundary.
+Both graph queries run outside database transactions. A complete, changed snapshot
+is written with typed SQL parameters in one short transaction. A failed read retains
+the last snapshot and records the error. SQL errors abort the transaction and exit
+the worker; the postmaster restarts it after five seconds. Lock waits are bounded
+by a two-second timeout. PostgreSQL signals are checked between executor spins;
+native ROS setup, graph calls, and teardown can still delay shutdown.
+
+The worker connects as the bootstrap superuser and writes only in the extension
+schema resolved from `pg_extension`. ROS peers and native runtime libraries are
+part of the server trust boundary. Keep write/DDL access to the extension tables
+restricted. Ordinary readers require only schema USAGE and table SELECT privileges.
+The graph tables are derived caches and are repopulated after server restart.
 
 ## CI and releases
 
 CI builds the Docker test stage. Packaging also starts a disposable server and
-checks `CREATE EXTENSION` and both graph functions before uploading the Jammy/PG18
+checks `CREATE EXTENSION` and background graph synchronization before uploading the Jammy/PG18
 archive and SHA256. A pushed `v<version>` tag runs the same checks and publishes
 those artifacts as a GitHub Release after matching the tag to Cargo.toml.
 No image registry publishing is configured.
