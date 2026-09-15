@@ -68,6 +68,76 @@ have been removed. Queries now read the saved tables and never create ROS nodes.
 This development version changes the installation SQL; existing installations need
 a fresh extension installation. No versioned upgrade script is provided yet.
 
+## Subscribe to ROS messages with LISTEN / NOTIFY
+
+In a listening connection, commit `LISTEN` before starting the subscriber:
+
+```sql
+LISTEN "/chatter";
+```
+
+In a separate, dedicated connection, run:
+
+```sql
+SET statement_timeout = 0;
+SET client_connection_check_interval = '1s';
+CALL subscribe('/chatter');
+```
+
+`CALL` runs indefinitely until canceled or an error occurs. Run it in your client's
+background task or in a separate terminal. Use autocommit: it cannot run inside
+`BEGIN`/`COMMIT`, a function, or another atomic context. A procedure is required
+because each notification batch must commit while the call is still running.
+Cancel with your client's query-cancel operation, Ctrl+C in `psql`, or
+`pg_cancel_backend(pid)`. Restart the call after a server restart or failure.
+The connection-check setting lets PostgreSQL detect a disconnected client during
+an otherwise idle subscription on supported platforms.
+
+The topic name is exactly the PostgreSQL channel name. Use a fully qualified ROS
+name and quote it in `LISTEN`. Names over PostgreSQL's 63-byte channel limit are
+rejected rather than truncated. There is no subscription table or channel mapping.
+Run one `CALL` per topic; multiple calls for the same topic each send notifications.
+Any number of SQL sessions can listen on the channel. `UNLISTEN "/chatter"` stops
+only that listening session; cancel the `CALL` to stop receiving from ROS.
+
+The procedure waits for the topic to appear, discovers its message type, and creates
+one ROS subscription. Multiple advertised types cause an error. The selected type
+stays fixed for the call's lifetime. Its C introspection and type-support libraries
+must be installed in the database server's sourced ROS environment. This subscription
+runs independently of the graph worker and does not require shared preloading.
+
+Each notification contains JSON:
+
+```json
+{"topic":"/chatter","message_type":"std_msgs/msg/String","sequence":0,"message":{"data":"hello"}}
+```
+
+The sequence increases per call, preventing PostgreSQL from folding identical
+messages within one transaction. Scalars, strings, nested messages, arrays, and
+sequences are supported. Non-finite floats become JSON `null`; long-double fields
+are unsupported. Use a client that consumes asynchronous notifications. In `psql`,
+execute a query to display pending notifications; keep listeners out of long-running
+transactions.
+
+Delivery is transient with no replay. ROS QoS is best-effort, volatile, depth 10.
+The callback queue holds 256 messages and drops new messages when full. JSON payloads
+over 7,999 bytes (including the envelope), unsupported fields, or nesting over 64
+levels are dropped. Drop counts and encoding errors are reported to the calling
+connection as warnings, at most once per second. ROS or SQL errors terminate the
+call; notifications from earlier committed batches remain delivered.
+
+The procedure loads native ROS libraries, so execution is restricted by default.
+Grant it only to trusted roles:
+
+```sql
+GRANT EXECUTE ON PROCEDURE subscribe(text) TO ros_subscriber;
+-- Also grant USAGE on the extension schema when needed.
+```
+
+PostgreSQL notification channels have **no per-channel access controls**: any user
+in the database can listen or send spoofed notifications. Use a trusted database
+for sensitive topics; restricting procedure execution does not restrict listening.
+
 ## Build and run with Docker
 
 Targets Linux amd64, Ubuntu 22.04, PostgreSQL 18, Rust 1.96.0, pgrx 0.19.2, and

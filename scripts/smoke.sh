@@ -42,6 +42,7 @@ docker run -d --name "$publisher" --network "container:$container" --ipc "contai
     -e ROS_DOMAIN_ID=73 --entrypoint /ros_entrypoint.sh "$image" \
     ros2 topic pub /pg_ros2_smoke std_msgs/msg/String '{data: smoke}' >/dev/null
 wait_sql "SELECT EXISTS (SELECT FROM topics WHERE topic_name = '/pg_ros2_smoke' AND message_type = 'std_msgs/msg/String') AND EXISTS (SELECT FROM nodes)"
+docker exec -i -u postgres "$container" /ros_entrypoint.sh python3 - < "$(dirname "$0")/subscriptions-smoke.py"
 # A blocked write must roll back both tables and be retried after worker restart.
 sql "ALTER TABLE topics ADD CONSTRAINT reject_test_topic CHECK (topic_name <> '/pg_ros2_added')" >/dev/null
 docker run -d --name "$extra" --network "container:$container" --ipc "container:$container" --user postgres \
@@ -80,4 +81,4 @@ for _ in {1..60}; do
     sleep 0.5
 done
 wait_sql "SELECT NOT EXISTS (SELECT FROM nodes WHERE node_name = 'stale_before_restart') AND EXISTS (SELECT FROM worker_status WHERE last_error IS NULL)"
-echo 'Smoke passed: automatic startup, graph additions/removals, atomic rollback, worker recovery, reader access, reinstall, and server restart'
+echo 'Smoke passed: automatic startup, graph additions/removals, topic notifications, atomic rollback, worker recovery, reader access, reinstall, and server restart'

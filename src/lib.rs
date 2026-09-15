@@ -12,6 +12,8 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
+mod subscriptions;
+
 ::pgrx::pg_module_magic!(name, version);
 
 static DATABASE: GucSetting<Option<CString>> =

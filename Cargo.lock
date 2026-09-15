@@ -1305,6 +1305,7 @@ dependencies = [
  "pgrx",
  "pgrx-tests",
  "rclrs",
+ "serde_json",
 ]
 
 [[package]]

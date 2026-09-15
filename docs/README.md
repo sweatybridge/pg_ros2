@@ -25,11 +25,16 @@ The test suite checks atomic snapshot reconciliation, duplicate node names, mult
 message types, unchanged snapshots, and persisted discovery errors. `scripts/smoke.sh`
 checks worker startup, automatic graph arrivals/removals, SQL failure rollback and
 recovery, reader privileges, extension reinstallation, and PostgreSQL restart.
+It also runs `subscriptions-smoke.py` to exercise ROS message delivery to two SQL
+listeners, JSON escaping, repeated messages, oversized payloads, delivery before
+CALL returns, cancellation, backend reuse, permissions, and rejection of atomic calls.
+The pgrx tests cover
+dynamic JSON conversion of nested messages, arrays, sequences, and byte limits.
 
 Use the release profile for tests and packages. rclrs 0.7.0 vendors some interfaces
 from newer ROS distributions (for example `SetLoggerLevelsResult`), whose native
 symbols do not exist in Humble. Release LTO removes these unused bindings from this
-graph-only extension. An unoptimized pgrx test build retains them and fails to load.
+extension. An unoptimized pgrx test build retains them and fails to load.
 Adding new message APIs requires checking their Humble compatibility explicitly.
 
 For a server installed separately, start PostgreSQL from an environment which has
@@ -58,11 +63,22 @@ After installation, run `CREATE EXTENSION pg_ros2` and the README queries.
 
 ## Execution model and limits
 
-ROS initialization occurs only in the background worker, after PostgreSQL forks it.
-The postmaster only registers the worker and configuration. Client queries do not
-initialize ROS. One persistent node and executor live for the worker lifetime.
-The executor spins in bounded 100 ms intervals; callbacks only set an atomic flag.
-All SPI calls and transactions execute on the PostgreSQL worker thread.
+ROS initialization occurs after fork, in the graph worker or a backend executing
+`CALL subscribe`. The postmaster only registers the worker and configuration.
+Graph-table reads do not initialize ROS. The graph worker owns one persistent node
+and executor, spins in bounded 100 ms intervals, and uses an atomic flag to record
+graph changes. Its SPI calls execute on the PostgreSQL worker thread.
+
+`CALL subscribe(topic)` creates a separate ROS node in the calling backend after
+fork. It validates a non-atomic CALL context and opens SPI with `SPI_OPT_NONATOMIC`.
+Message callbacks only enqueue bounded JSON payloads. The main backend thread spins
+in 100 ms intervals, checks PostgreSQL interrupts, drains up to 256 payloads, and
+commits `pg_notify` calls through the outer SPI connection. Nested pgrx SPI clients
+close before each commit; only owned Rust data survives transaction boundaries.
+Canceling the call releases its ROS resources. SQL errors abort the current batch;
+previously committed notifications remain delivered. Native ROS calls may delay
+cancellation. No background worker or persistent subscription registry is involved.
+Native DDS/rclrs reception and dynamic field views allocate before the JSON bound.
 
 Both graph queries run outside database transactions. A complete, changed snapshot
 is written with typed SQL parameters in one short transaction. A failed read retains
