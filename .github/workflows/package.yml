@@ -1,0 +1,27 @@
+name: Package
+on:
+  workflow_dispatch:
+  workflow_call:
+permissions:
+  contents: read
+jobs:
+  package:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - name: Package and test runtime
+        run: |
+          docker build --target runtime -t pg-ros2:humble .
+          bash scripts/smoke.sh pg-ros2:humble
+          docker build --target package --output type=local,dest=target/package .
+          test -s target/package/usr/lib/postgresql/18/lib/pg_ros2.so
+          test -s target/package/usr/share/postgresql/18/extension/pg_ros2.control
+          find target/package/usr/share/postgresql/18/extension -name 'pg_ros2--*.sql' | grep -q .
+          tar -C target/package -czf pg_ros2-pg18-jammy-amd64.tar.gz .
+          sha256sum pg_ros2-pg18-jammy-amd64.tar.gz > pg_ros2-pg18-jammy-amd64.tar.gz.sha256
+      - uses: actions/upload-artifact@v7
+        with:
+          name: pg_ros2-pg18-jammy-amd64
+          path: pg_ros2-pg18-jammy-amd64.tar.gz*
+          if-no-files-found: error
