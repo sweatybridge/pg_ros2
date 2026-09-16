@@ -24,21 +24,21 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: Install Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          cache-key: pg${{ matrix.pg_version }}-${{ matrix.runner }}
+          cache-directories: /home/runner/.pgrx
+
       - uses: ./.github/actions/setup-pgrx
         with:
           pg_version: ${{ matrix.pg_version }}
 
       - name: Build extension
-        run: |
-          . "$HOME/.cargo/env"
-          cargo pgrx package \
-            --pg-config "/usr/lib/postgresql/${{ matrix.pg_version }}/bin/pg_config" \
-            --features "pg${{ matrix.pg_version }}" \
-            --no-default-features
+        run: cargo pgrx package --features pg${{ matrix.pg_version }} --no-default-features
 
       - name: Create Debian package
         run: |
-          . "$HOME/.cargo/env"
           PKG_VERSION=$(grep -oP '^version = "\K[^"]+' Cargo.toml)
           PG_VERSION=${{ matrix.pg_version }}
           UBUNTU_CODENAME=$(lsb_release -cs)
