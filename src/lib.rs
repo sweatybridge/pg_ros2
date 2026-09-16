@@ -12,6 +12,7 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
+mod parameters;
 mod subscriptions;
 
 ::pgrx::pg_module_magic!(name, version);
@@ -32,6 +33,22 @@ CREATE TABLE @extschema@.topics (
     refreshed_at timestamptz NOT NULL
 );
 CREATE TABLE @extschema@.worker_status (
+    singleton boolean PRIMARY KEY DEFAULT true CHECK (singleton),
+    worker_pid integer NOT NULL,
+    last_checked timestamptz NOT NULL,
+    last_refreshed timestamptz,
+    last_error text
+);
+CREATE TABLE @extschema@.parameters (
+    node_name text NOT NULL,
+    namespace text NOT NULL,
+    parameter_name text NOT NULL,
+    parameter_type text NOT NULL,
+    value jsonb NOT NULL,
+    refreshed_at timestamptz NOT NULL,
+    PRIMARY KEY (node_name, namespace, parameter_name)
+);
+CREATE TABLE @extschema@.parameter_status (
     singleton boolean PRIMARY KEY DEFAULT true CHECK (singleton),
     worker_pid integer NOT NULL,
     last_checked timestamptz NOT NULL,
@@ -142,6 +159,9 @@ fn run_observer() -> Result<(), RclrsError> {
     let mut extension_oid = None;
     let mut last_error = None;
     let mut waiting_logged = false;
+    let mut previous_parameters = None;
+    let mut parameter_extension = None;
+    let mut next_parameters = startup;
     while BackgroundWorker::wait_latch(Some(Duration::ZERO)) {
         // A timeout is the normal end of our bounded spin, not a ROS failure.
         executor
@@ -166,11 +186,32 @@ fn run_observer() -> Result<(), RclrsError> {
         });
         if installed.is_some() {
             if let Ok(snapshot) = snapshot {
+                if Instant::now() >= next_parameters {
+                    let parameters = parameters::read(&node, &mut executor, &snapshot.nodes);
+                    parameter_extension = BackgroundWorker::transaction(|| {
+                        parameters::persist(
+                            parameters.as_deref().map_err(String::as_str),
+                            previous_parameters.as_deref(),
+                            parameter_extension,
+                        )
+                    });
+                    if let Err(message) = &parameters {
+                        pgrx::warning!(
+                            "pg_ros2 event=parameter_discovery_failed error={}",
+                            message
+                        );
+                    } else {
+                        previous_parameters = parameters.ok();
+                    }
+                    next_parameters = Instant::now() + Duration::from_secs(5);
+                }
                 previous = Some(snapshot);
             }
             waiting_logged = false;
         } else {
             previous = None;
+            previous_parameters = None;
+            parameter_extension = None;
             if !waiting_logged {
                 pgrx::log!("pg_ros2 event=waiting_for_extension hint=run_CREATE_EXTENSION_pg_ros2_in_configured_database");
                 waiting_logged = true;

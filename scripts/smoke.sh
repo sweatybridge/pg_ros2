@@ -45,6 +45,7 @@ docker run -d --name "$publisher" --network "container:$container" --ipc "contai
     ros2 topic pub /pg_ros2_smoke std_msgs/msg/String '{data: smoke}' >/dev/null
 wait_sql "SELECT EXISTS (SELECT FROM topics WHERE topic_name = '/pg_ros2_smoke' AND message_type = 'std_msgs/msg/String') AND EXISTS (SELECT FROM nodes)"
 docker exec -i -u postgres "$container" /ros_entrypoint.sh python3 - < "$(dirname "$0")/subscriptions-smoke.py"
+docker exec -i -u postgres "$container" /ros_entrypoint.sh python3 - < "$(dirname "$0")/parameters-smoke.py"
 # A blocked write must roll back both tables and be retried after worker restart.
 sql "ALTER TABLE topics ADD CONSTRAINT reject_test_topic CHECK (topic_name <> '/pg_ros2_added')" >/dev/null
 docker run -d --name "$extra" --network "container:$container" --ipc "container:$container" --user postgres \
@@ -67,8 +68,8 @@ done
 sql 'ALTER TABLE topics DROP CONSTRAINT reject_test_topic' >/dev/null
 wait_sql "SELECT EXISTS (SELECT FROM topics WHERE topic_name = '/pg_ros2_added') AND (SELECT last_error IS NULL FROM worker_status)"
 # Readers need only SELECT, and reads never create ROS nodes.
-sql 'CREATE ROLE graph_reader; GRANT USAGE ON SCHEMA ros_graph TO graph_reader; GRANT SELECT ON nodes, topics, worker_status TO graph_reader' >/dev/null
-sql 'SET ROLE graph_reader; SELECT count(*) FROM nodes; SELECT count(*) FROM topics' >/dev/null
+sql 'CREATE ROLE graph_reader; GRANT USAGE ON SCHEMA ros_graph TO graph_reader; GRANT SELECT ON nodes, topics, parameters, worker_status, parameter_status TO graph_reader' >/dev/null
+sql 'SET ROLE graph_reader; SELECT count(*) FROM nodes; SELECT count(*) FROM topics; SELECT count(*) FROM parameters' >/dev/null
 # Removing external publishers must remove their graph records automatically.
 docker stop -t 5 "$extra" "$publisher" >/dev/null
 wait_sql "SELECT NOT EXISTS (SELECT FROM topics WHERE topic_name IN ('/pg_ros2_smoke', '/pg_ros2_added')) AND NOT EXISTS (SELECT FROM nodes)"

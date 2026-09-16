@@ -33,6 +33,9 @@ checks notification delivery from `df.start('CALL ...')` under a trusted login r
 while the submitting connection remains available.
 The pgrx tests cover
 dynamic JSON conversion of nested messages, arrays, sequences, and byte limits.
+They also cover all ROS parameter value types and parameter snapshot reconciliation.
+`scripts/parameters-smoke.py` checks initial parameter discovery, updates, declarations,
+removals, service timeouts with snapshot preservation, recovery, and node removal.
 
 Use the release profile for tests and packages. rclrs 0.7.0 vendors some interfaces
 from newer ROS distributions (for example `SetLoggerLevelsResult`), whose native
@@ -110,6 +113,15 @@ schema resolved from `pg_extension`. ROS peers and native runtime libraries are
 part of the server trust boundary. Keep write/DDL access to the extension tables
 restricted. Ordinary readers require only schema USAGE and table SELECT privileges.
 The graph tables are derived caches and are repopulated after server restart.
+
+Parameter polling uses the same observer and executor, outside SQL transactions.
+Requests run concurrently across nodes, with a three-second shared deadline per
+stage (service readiness, listing, retrieval). The worker polls again five seconds
+after completion, independent of parameter events. Parameter snapshots and their
+status are persisted in a separate transaction so an unreachable parameter service
+does not prevent graph discovery. This is a full-domain snapshot: one failed peer
+preserves all prior parameter rows. Nodes without advertised parameter list services
+are excluded, and duplicate fully qualified node names are queried once.
 
 ## CI and releases
 

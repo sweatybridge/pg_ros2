@@ -19,6 +19,7 @@ Install the extension in the configured database:
 CREATE EXTENSION pg_ros2;
 SELECT * FROM nodes;
 SELECT * FROM topics;
+SELECT * FROM parameters;
 SELECT * FROM worker_status;
 ```
 
@@ -33,7 +34,9 @@ requires a server restart; the database must exist before the worker can connect
 | --- | --- |
 | `nodes` | `node_name`, `namespace`, `refreshed_at` |
 | `topics` | `topic_name`, `message_type`, `refreshed_at` |
+| `parameters` | `node_name`, `namespace`, `parameter_name`, `parameter_type`, `value` (JSONB), `refreshed_at` |
 | `worker_status` | `singleton`, `worker_pid`, `last_checked`, `last_refreshed`, `last_error` |
+| `parameter_status` | `singleton`, `worker_pid`, `last_checked`, `last_refreshed`, `last_error` |
 
 Graph notifications trigger a new snapshot. rclrs also checks once per second to
 cover discovery races. Changed snapshots replace both tables in one transaction;
@@ -58,7 +61,7 @@ failed workers after five seconds. Inspect `pg_stat_activity` for backend type
 Readers need no ROS access. Grant access as appropriate:
 
 ```sql
-GRANT SELECT ON nodes, topics, worker_status TO reader_role;
+GRANT SELECT ON nodes, topics, parameters, worker_status, parameter_status TO reader_role;
 -- Also grant USAGE on the extension schema when needed.
 ```
 
@@ -67,6 +70,47 @@ The worker owns synchronization; direct table edits are unsupported. The previou
 have been removed. Queries now read the saved tables and never create ROS nodes.
 This development version changes the installation SQL; existing installations need
 a fresh extension installation. No versioned upgrade script is provided yet.
+
+## Query ROS parameters
+
+```sql
+SELECT namespace, node_name, parameter_name, parameter_type, value
+FROM parameters
+ORDER BY namespace, node_name, parameter_name;
+
+SELECT (value #>> '{}')::boolean AS use_sim_time
+FROM parameters
+WHERE namespace = '/' AND node_name = 'my_node'
+  AND parameter_name = 'use_sim_time';
+
+SELECT * FROM parameter_status;
+```
+
+The worker polls the standard `list_parameters` and `get_parameters` services,
+including nested parameter names, approximately every five seconds after the
+previous poll finishes. This captures values set before discovery as well as later
+changes, declarations, and removals. Nodes with no advertised list service are
+omitted. Duplicate fully qualified node names share a service address and cannot
+be distinguished reliably; the table has one row per address and parameter name.
+
+`parameter_type` is `not_set`, `bool`, `integer`, `double`, `string`, `byte_array`,
+`bool_array`, `integer_array`, `double_array`, or `string_array`. Values use JSON
+scalars or arrays; bytes are integers from 0 to 255. Unset values and non-finite
+floating-point values become JSON `null` (including non-finite array elements).
+
+A successful changed poll replaces the parameter table atomically. Unchanged polls
+leave its rows and refresh timestamps untouched. Parameters are saved separately
+from the graph tables; there is no atomic ROS snapshot across nodes or between
+listing names and reading values. A removed node disappears on a subsequent
+successful poll. Reads never call ROS, and SQL writes do not set ROS parameters.
+
+Each of service readiness, listing, and value retrieval has a shared three-second
+deadline across all peers. Shutdown is checked between 100 ms executor spins.
+A failed poll preserves the entire last parameter snapshot and records an error
+in `parameter_status`; graph updates continue. Check its `last_checked` and
+`last_error` before relying on parameter values. `last_refreshed` is the last saved
+snapshot time. Parameter polling may delay the next graph refresh by up to these
+deadlines. Remote parameters may contain secrets; grant table access accordingly.
 
 ## Subscribe to ROS messages with LISTEN / NOTIFY
 
