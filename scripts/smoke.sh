@@ -15,7 +15,8 @@ cleanup() {
 trap cleanup EXIT
 # Test a non-default database and schema, including startup before installation.
 docker run -d --name "$container" --ipc=shareable -e ROS_DOMAIN_ID=73 "$image" \
-    postgres -c shared_preload_libraries=pg_ros2 -c pg_ros2.database=graph_test >/dev/null
+    postgres -c shared_preload_libraries=pg_ros2,pg_durable \
+    -c pg_ros2.database=graph_test -c pg_durable.database=graph_test >/dev/null
 for _ in {1..60}; do
     if docker exec -u postgres "$container" pg_isready -q; then break; fi
     sleep 0.5
@@ -34,6 +35,7 @@ wait_sql() {
     return 1
 }
 sql 'CREATE SCHEMA ros_graph; CREATE EXTENSION pg_ros2 SCHEMA ros_graph' >/dev/null
+sql 'CREATE EXTENSION pg_durable' >/dev/null
 wait_sql 'SELECT EXISTS (SELECT FROM worker_status WHERE last_refreshed IS NOT NULL AND last_error IS NULL)'
 [[ $(sql "SELECT count(*) = 0 FROM nodes WHERE node_name LIKE 'pg_ros2_worker_%'") == t ]]
 [[ $(sql "SELECT to_regprocedure('ros_graph.ros2_nodes(integer)') IS NULL AND to_regprocedure('ros_graph.refresh_nodes(integer)') IS NULL") == t ]]

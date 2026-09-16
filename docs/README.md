@@ -28,6 +28,9 @@ recovery, reader privileges, extension reinstallation, and PostgreSQL restart.
 It also runs `subscriptions-smoke.py` to exercise ROS message delivery to two SQL
 listeners, JSON escaping, repeated messages, oversized payloads, delivery before
 CALL returns, cancellation, backend reuse, permissions, and rejection of atomic calls.
+The smoke image also preloads pg_durable, installs it in the test database, and
+checks notification delivery from `df.start('CALL ...')` under a trusted login role
+while the submitting connection remains available.
 The pgrx tests cover
 dynamic JSON conversion of nested messages, arrays, sequences, and byte limits.
 

@@ -76,7 +76,54 @@ In a listening connection, commit `LISTEN` before starting the subscriber:
 LISTEN "/chatter";
 ```
 
-In a separate, dedicated connection, run:
+The Docker image includes `pg_durable` and preloads both extensions. Install
+`pg_durable` in the same database, then grant a trusted login role permission to
+launch subscriptions (run these setup statements as the administrator):
+
+```sql
+CREATE EXTENSION pg_durable;
+CREATE ROLE ros_subscriber LOGIN;
+GRANT USAGE ON SCHEMA public TO ros_subscriber;
+GRANT EXECUTE ON PROCEDURE public.subscribe(text) TO ros_subscriber;
+SELECT df.grant_usage('ros_subscriber');
+```
+
+Connect as `ros_subscriber`, or use `SET ROLE ros_subscriber` from an administrator
+session, and launch the subscription:
+
+```sql
+SELECT df.start($$CALL public.subscribe('/chatter')$$, 'ROS /chatter');
+-- Save the returned instance ID for monitoring and cancellation.
+SELECT df.status('<instance_id>');
+```
+
+`df.start` returns while the procedure runs in a separate backend. Commit the
+launch before expecting messages. Submit only the `CALL` as the workflow step;
+do not wrap it in `BEGIN`/`COMMIT`. Use the actual extension schema in place of
+`public` if installed elsewhere. Superuser workflow submission stays disabled;
+the login role above has the required privileges. For a custom database, set
+both `pg_ros2.database` and `pg_durable.database` in the server command.
+
+To stop a subscription, cancel its workflow as the submitting role:
+
+```sql
+SELECT df.cancel('<instance_id>');
+```
+
+An administrator can also cancel any still-running SQL activity after canceling
+the workflow:
+
+```sql
+SELECT pg_cancel_backend(pid) FROM pg_stat_activity
+WHERE usename = 'ros_subscriber'
+  AND query = $$CALL public.subscribe('/chatter')$$;
+```
+
+Workflow persistence does not persist ROS messages: an interrupted subscription
+starts a fresh ROS session when re-executed, and missed notifications have no replay.
+Each active subscription occupies one execution connection.
+
+Alternatively, run the procedure directly in a separate, dedicated connection:
 
 ```sql
 SET statement_timeout = 0;
@@ -140,22 +187,25 @@ for sensitive topics; restricting procedure execution does not restrict listenin
 
 ## Build and run with Docker
 
-Targets Linux amd64, Ubuntu 22.04, PostgreSQL 18, Rust 1.96.0, pgrx 0.19.2, and
-rclrs 0.7.0. The runtime image enables `shared_preload_libraries=pg_ros2` by default.
+Targets Linux amd64 and arm64, Ubuntu 22.04, PostgreSQL 18, Rust 1.96.0, pgrx 0.19.2, and
+rclrs 0.7.0. The runtime image installs the pg_durable 0.2.8 PostgreSQL 18
+Debian release package from `sweatybridge/pg_durable` for the target architecture
+and enables `shared_preload_libraries=pg_ros2,pg_durable` by default. Published
+multi-architecture manifests include both amd64 and arm64 images.
 
 ```sh
-docker build --target test -t pg-ros2:test .
-docker build --target runtime -t pg-ros2:humble .
+docker build --build-arg PG_ROS2_VERSION=<released-version> -t pg-ros2:humble .
 docker run --rm -d --name pg-ros2 -e ROS_DOMAIN_ID=42 pg-ros2:humble
 # Wait for PostgreSQL to report that it is ready before running SQL.
 docker exec -u postgres pg-ros2 psql -v ON_ERROR_STOP=1 -c 'CREATE EXTENSION pg_ros2'
+docker exec -u postgres pg-ros2 psql -v ON_ERROR_STOP=1 -c 'CREATE EXTENSION pg_durable'
 docker exec -u postgres pg-ros2 psql -c 'SELECT * FROM worker_status'
 docker exec -u postgres pg-ros2 psql -c 'SELECT * FROM nodes'
 bash scripts/smoke.sh pg-ros2:humble
 docker stop pg-ros2
 ```
 
-The runtime is a development image containing build tools. It uses local socket
+The runtime installs released packages for both extensions. It uses local socket
 trust authentication and SCRAM for host connections; no database password is
 preconfigured. Data is ephemeral unless a volume is mounted at
 `/var/lib/postgresql/pg_ros2` writable by the container's `postgres` user.

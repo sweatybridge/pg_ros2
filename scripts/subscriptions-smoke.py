@@ -125,7 +125,7 @@ try:
     sql(caller, "ROLLBACK")
     rejected("CALL ros_graph.subscribe('relative')", "fully qualified")
     rejected("CALL ros_graph.subscribe('/' || repeat('x', 63))", "63-byte")
-    sql(admin, "CREATE ROLE ros_subscriber_test; GRANT USAGE ON SCHEMA ros_graph TO ros_subscriber_test")
+    sql(admin, "CREATE ROLE ros_subscriber_test LOGIN; GRANT USAGE ON SCHEMA ros_graph TO ros_subscriber_test")
     sql(caller, "SET ROLE ros_subscriber_test")
     rejected(call.decode(), "permission denied")
     sql(admin, "GRANT EXECUTE ON PROCEDURE ros_graph.subscribe(text) TO ros_subscriber_test")
@@ -165,9 +165,25 @@ try:
     wait(lambda: notifications(listener), publish)
     cancel()
     wait(lambda: publisher.get_subscription_count() == 0)
+    # A durable launch must return immediately and stream from its own backend.
+    sql(admin, "SELECT df.grant_usage('ros_subscriber_test')")
+    notifications(listener)
+    instance = sql(caller, "SELECT df.start($$CALL ros_graph.subscribe('/pg_ros2_messages')$$)")
+    assert instance
+    try:
+        messages = wait(lambda: notifications(listener), publish)
+        assert messages[-1]["message"] == {"data": text}
+        assert sql(caller, "SELECT 1") == "1", "df.start kept the submitting backend busy"
+    finally:
+        sql(caller, f"SELECT df.cancel('{instance}')")
+        # Stop any in-flight SQL activity as well as canceling its workflow.
+        sql(admin, "SELECT pg_cancel_backend(pid) FROM pg_stat_activity "
+            "WHERE usename = 'ros_subscriber_test' AND pid <> " + str(caller_pid) +
+            " AND query = $$CALL ros_graph.subscribe('/pg_ros2_messages')$$")
+    wait(lambda: publisher.get_subscription_count() == 0)
     print("Subscriptions passed: CALL streams before return, topic/channel identity, "
           "JSON, fan-out, repeated messages, payload limit, permissions, "
-          "transaction rejection, cancellation, backend reuse")
+          "transaction rejection, cancellation, backend reuse, df.start delivery")
 finally:
     # Cancellation is safe even when an earlier assertion failed while CALL ran.
     sql(admin, f"SELECT pg_cancel_backend({caller_pid})")
