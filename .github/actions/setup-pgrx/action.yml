@@ -1,0 +1,34 @@
+name: Setup pgrx
+description: Initialize a downloaded PostgreSQL for pgrx
+
+inputs:
+  pg_version:
+    description: PostgreSQL major version
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Install dependencies
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y software-properties-common
+        sudo apt-get update
+        sudo apt-get install -y \
+          build-essential pkg-config \
+          libclang-dev \
+          libreadline-dev
+
+    - name: Install cargo-pgrx
+      shell: bash
+      run: cargo install --locked cargo-pgrx
+
+    - name: Initialize pgrx
+      shell: bash
+      run: |
+        set +e
+        v=$(cargo pgrx info version pg${{ inputs.pg_version }})
+        if [ $? -ne 0 ]; then
+          cargo pgrx init --pg${{ inputs.pg_version }} download
+        fi

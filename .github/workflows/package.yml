@@ -1,27 +1,111 @@
 name: Package
+
 on:
+  push:
+    branches: [main]
+    paths:
+      - Cargo.toml
   workflow_dispatch:
-  workflow_call:
+
 permissions:
   contents: read
+
 jobs:
-  package:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
+  build:
+    permissions:
+      contents: read
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        pg_version: [18]
+        runner: [ubuntu-22.04, ubuntu-22.04-arm]
+
     steps:
       - uses: actions/checkout@v7
-      - name: Package and test runtime
-        run: |
-          docker build --target runtime -t pg-ros2:humble .
-          bash scripts/smoke.sh pg-ros2:humble
-          docker build --target package --output type=local,dest=target/package .
-          test -s target/package/usr/lib/postgresql/18/lib/pg_ros2.so
-          test -s target/package/usr/share/postgresql/18/extension/pg_ros2.control
-          find target/package/usr/share/postgresql/18/extension -name 'pg_ros2--*.sql' | grep -q .
-          tar -C target/package -czf pg_ros2-pg18-jammy-amd64.tar.gz .
-          sha256sum pg_ros2-pg18-jammy-amd64.tar.gz > pg_ros2-pg18-jammy-amd64.tar.gz.sha256
-      - uses: actions/upload-artifact@v7
+
+      - uses: ./.github/actions/setup-pgrx
         with:
-          name: pg_ros2-pg18-jammy-amd64
-          path: pg_ros2-pg18-jammy-amd64.tar.gz*
-          if-no-files-found: error
+          pg_version: ${{ matrix.pg_version }}
+
+      - name: Build extension
+        run: |
+          . "$HOME/.cargo/env"
+          cargo pgrx package \
+            --pg-config "/usr/lib/postgresql/${{ matrix.pg_version }}/bin/pg_config" \
+            --features "pg${{ matrix.pg_version }}" \
+            --no-default-features
+
+      - name: Create Debian package
+        run: |
+          . "$HOME/.cargo/env"
+          PKG_VERSION=$(grep -oP '^version = "\K[^"]+' Cargo.toml)
+          PG_VERSION=${{ matrix.pg_version }}
+          UBUNTU_CODENAME=$(lsb_release -cs)
+          ARCH=$(dpkg --print-architecture)
+          PKG_NAME="pg-ros2-pg${PG_VERSION}"
+          PKG_DIR="${PKG_NAME}_${PKG_VERSION}-1~${UBUNTU_CODENAME}_${ARCH}"
+
+          # cargo pgrx package outputs to target/release/pg_ros2-pg$VER/
+          SRC_DIR="target/release/pg_ros2-pg${PG_VERSION}"
+
+          mkdir -p "${PKG_DIR}/DEBIAN"
+          cp -a "${SRC_DIR}/." "${PKG_DIR}/"
+
+          cat > "${PKG_DIR}/DEBIAN/control" <<EOF
+          Package: ${PKG_NAME}
+          Version: ${PKG_VERSION}-1
+          Section: database
+          Priority: optional
+          Architecture: ${ARCH}
+          Depends: postgresql-${PG_VERSION}
+          Maintainer: pg_ros2 contributors
+          Description: Provides SQL access to ROS2 interfaces, including
+           nodes, topics, services, parameters, and actions.
+          EOF
+
+          # Remove leading spaces from control file
+          sed -i 's/^          //' "${PKG_DIR}/DEBIAN/control"
+
+          dpkg-deb --build "${PKG_DIR}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: pg-ros2-pg${{ matrix.pg_version }}-${{ matrix.runner }}
+          path: "*.deb"
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      version: ${{ steps.version.outputs.value }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Get version
+        id: version
+        run: echo "value=$(grep -oP '^version = "\K[^"]+' Cargo.toml)" >> "$GITHUB_OUTPUT"
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v8
+        with:
+          merge-multiple: true
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: v${{ steps.version.outputs.value }}
+          overwrite_files: false
+          files: ./*.deb
+
+  docker:
+    needs: release
+    permissions:
+      contents: read
+    uses: ./.github/workflows/publish.yml
+    with:
+      version: ${{ needs.release.outputs.version }}
+    secrets: inherit

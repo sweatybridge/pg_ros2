@@ -1,16 +1,64 @@
 name: Test
+
 on:
   pull_request:
   push:
     branches: [main]
-  workflow_dispatch:
-  workflow_call:
+
 permissions:
   contents: read
+
 jobs:
   test:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        pg_version: [18]
     steps:
       - uses: actions/checkout@v7
-      - run: docker build --target test -t pg-ros2:test .
+
+      - name: Install Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          components: clippy, rustfmt
+          cache-key: pg${{ matrix.pg_version }}-ros2
+          cache-directories: /home/runner/.pgrx
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Setup pgrx
+        uses: ./.github/actions/setup-pgrx
+        with:
+          pg_version: ${{ matrix.pg_version }}
+
+      - name: Clippy
+        run: cargo clippy --all-targets --features pg${{ matrix.pg_version }} --no-default-features -- -D warnings
+
+      - name: Test
+        run: cargo pgrx test "pg${{ matrix.pg_version }}"
+
+  bench:
+    runs-on: ubuntu-22.04
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        pg_version: [18]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          cache-key: pg${{ matrix.pg_version }}-bench-ros2
+          cache-directories: /home/runner/.pgrx
+
+      - name: Setup pgrx
+        uses: ./.github/actions/setup-pgrx
+        with:
+          pg_version: ${{ matrix.pg_version }}
+
+      - name: Bench
+        run: cargo pgrx bench "pg${{ matrix.pg_version }}"
