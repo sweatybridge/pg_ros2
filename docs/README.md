@@ -113,8 +113,12 @@ The graph tables are derived caches and are repopulated after server restart.
 
 ## CI and releases
 
-CI builds the Docker test stage. Packaging also starts a disposable server and
-checks `CREATE EXTENSION` and background graph synchronization before uploading the Jammy/PG18
-archive and SHA256. A pushed `v<version>` tag runs the same checks and publishes
-those artifacts as a GitHub Release after matching the tag to Cargo.toml.
-No image registry publishing is configured.
+The Package workflow runs when `Cargo.toml` changes on `main`, or when dispatched
+manually. It builds PostgreSQL 18 Debian packages for amd64 and arm64 and uploads
+them to a GitHub Release tagged `v<version>` using the version from `Cargo.toml`.
+The Package workflow calls Publish Docker Image after creating the release.
+Images are published to `ghcr.io/sweatybridge/pg_ros2` using `GITHUB_TOKEN`, with
+`packages: write` permission; no Docker Hub credentials are required. Version and
+`latest` tags include both amd64 and arm64, with architecture-specific tags also
+available. Publish Docker Image can also be dispatched manually with a released
+version (without the leading `v`).

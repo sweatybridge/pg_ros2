@@ -193,6 +193,13 @@ Debian release package from `sweatybridge/pg_durable` for the target architectur
 and enables `shared_preload_libraries=pg_ros2,pg_durable` by default. Published
 multi-architecture manifests include both amd64 and arm64 images.
 
+Release images are published to `ghcr.io/sweatybridge/pg_ros2` with version tags
+and `latest`. Pull a published image with:
+
+```sh
+docker pull ghcr.io/sweatybridge/pg_ros2:latest
+```
+
 ```sh
 docker build --build-arg PG_ROS2_VERSION=<released-version> -t pg-ros2:humble .
 docker run --rm -d --name pg-ros2 -e ROS_DOMAIN_ID=42 pg-ros2:humble

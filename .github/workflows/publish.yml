@@ -7,11 +7,6 @@ on:
         description: pg_ros2 version to publish (without leading v)
         required: true
         type: string
-    secrets:
-      DOCKERHUB_USERNAME:
-        required: true
-      DOCKERHUB_TOKEN:
-        required: true
   workflow_dispatch:
     inputs:
       version:
@@ -24,6 +19,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      packages: write
     strategy:
       fail-fast: false
       matrix:
@@ -31,7 +27,7 @@ jobs:
           - amd64
           - arm64
     env:
-      IMAGE: sweatybridge/pg_ros2
+      IMAGE: ghcr.io/sweatybridge/pg_ros2
     steps:
       - uses: actions/checkout@v7
 
@@ -39,14 +35,17 @@ jobs:
 
       - uses: docker/login-action@v4.6.0
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - uses: docker/build-push-action@v7
         with:
           context: .
           platforms: linux/${{ matrix.arch }}
           push: true
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
           build-args: |
             PG_ROS2_VERSION=${{ inputs.version }}
           tags: |
@@ -58,15 +57,17 @@ jobs:
     needs: docker
     permissions:
       contents: read
+      packages: write
     env:
-      IMAGE: sweatybridge/pg_ros2
+      IMAGE: ghcr.io/sweatybridge/pg_ros2
     steps:
       - uses: docker/setup-buildx-action@v4
 
       - uses: docker/login-action@v4.6.0
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Create multi-arch manifests
         run: |
