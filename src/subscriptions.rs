@@ -141,17 +141,7 @@ fn receive(topic: &str) -> Result<(), String> {
             match payload {
                 Ok(payload) => {
                     // Nested atomic SPI closes before the outer connection commits.
-                    Spi::connect_mut(|client| {
-                        // Convert parameters inside the short-lived nested SPI
-                        // context, not the outer context that survives commits.
-                        client
-                            .update(
-                                "SELECT pg_catalog.pg_notify($1, $2)",
-                                None,
-                                &[topic.into(), payload.into()],
-                            )
-                            .unwrap();
-                    });
+                    notify(topic, payload);
                     notified = true;
                 }
                 Err(error) => {
@@ -182,6 +172,62 @@ fn receive(topic: &str) -> Result<(), String> {
             last_encoding_error = None;
             next_report = Instant::now() + Duration::from_secs(1);
         }
+    }
+}
+
+fn notify(topic: &str, payload: String) {
+    Spi::connect_mut(|client| {
+        // Convert parameters inside the short-lived nested SPI context,
+        // not the outer context that survives commits.
+        client
+            .update(
+                "SELECT pg_catalog.pg_notify($1, $2)",
+                None,
+                &[topic.into(), payload.into()],
+            )
+            .unwrap();
+    });
+}
+
+#[cfg(feature = "pg_bench")]
+#[pg_schema]
+mod benches {
+    use super::*;
+    use pgrx_bench::{black_box, Bencher};
+    use rclrs::{DynamicMessage, SimpleValueMut, ValueMut};
+
+    fn subscribe_message(b: &mut Bencher, bytes: usize) {
+        // Construct the ROS fixture and queue outside the measured loop.
+        let mut message = DynamicMessage::new("std_msgs/msg/String".try_into().unwrap()).unwrap();
+        let Some(ValueMut::Simple(SimpleValueMut::String(data))) = message.get_mut("data") else {
+            panic!("missing string field");
+        };
+        *data = "x".repeat(bytes).as_str().into();
+        let (sender, receiver) = sync_channel(256);
+        let sequence = AtomicU64::new(0);
+        b.iter(move || {
+            let payload = json::payload(
+                black_box("/pg_ros2_bench"),
+                "std_msgs/msg/String",
+                sequence.fetch_add(1, Ordering::Relaxed),
+                &black_box(&message).view(),
+            )
+            .unwrap();
+            sender.try_send(payload).unwrap();
+            notify("/pg_ros2_bench", receiver.try_recv().unwrap());
+        });
+    }
+
+    // Roll back each iteration's notification so pending NOTIFY state cannot
+    // accumulate or deduplicate across samples. Commits and DDS are not timed.
+    #[pg_bench(transaction = "subtransaction_per_iteration")]
+    fn bench_subscribe_message_256_bytes(b: &mut Bencher) {
+        subscribe_message(b, 256);
+    }
+
+    #[pg_bench(transaction = "subtransaction_per_iteration")]
+    fn bench_subscribe_message_4096_bytes(b: &mut Bencher) {
+        subscribe_message(b, 4096);
     }
 }
 

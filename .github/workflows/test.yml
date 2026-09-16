@@ -34,10 +34,11 @@ jobs:
           pg_version: ${{ matrix.pg_version }}
 
       - name: Clippy
-        run: cargo clippy --all-targets --features pg${{ matrix.pg_version }} --no-default-features -- -D warnings
+        run: cargo clippy --all-targets --features pg${{ matrix.pg_version }},pg_bench --no-default-features -- -D warnings
 
       - name: Test
-        run: cargo pgrx test "pg${{ matrix.pg_version }}"
+        # Release LTO removes rclrs bindings for interfaces unavailable in Humble.
+        run: cargo pgrx test pg${{ matrix.pg_version }} --release --no-default-features
 
   bench:
     runs-on: ubuntu-22.04
@@ -60,5 +61,5 @@ jobs:
         with:
           pg_version: ${{ matrix.pg_version }}
 
-      - name: Bench
-        run: cargo pgrx bench "pg${{ matrix.pg_version }}"
+      - name: Bench subscribe message processing
+        run: cargo pgrx bench pg${{ matrix.pg_version }} --no-default-features

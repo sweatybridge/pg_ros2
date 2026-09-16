@@ -37,6 +37,21 @@ symbols do not exist in Humble. Release LTO removes these unused bindings from t
 extension. An unoptimized pgrx test build retains them and fails to load.
 Adding new message APIs requires checking their Humble compatibility explicitly.
 
+### Subscription benchmarks
+
+Run `cargo pgrx bench pg18 --no-default-features` in the sourced Humble environment.
+The CI benchmark job runs this command with the default release profile.
+Two benchmarks measure subscription message processing for 256-byte and 4096-byte
+`std_msgs/msg/String` values: dynamic JSON encoding, the bounded queue transfer,
+and the same SPI `pg_notify` helper used by `subscribe`. Message construction and
+queue setup are outside the timing loop. Each iteration rolls back a subtransaction
+to discard pending notifications and prevent state accumulation between samples.
+
+These are per-message microbenchmarks, not end-to-end delivery measurements. They
+exclude DDS discovery/reception, executor polling, transaction commits, and client
+notification delivery. `CALL subscribe` cannot run directly inside the benchmark
+runner's transaction because it requires a top-level, non-atomic call.
+
 For a server installed separately, start PostgreSQL from an environment which has
 sourced Humble's `setup.bash`. That environment supplies `LD_LIBRARY_PATH`,
 `AMENT_PREFIX_PATH`, `ROS_DISTRO`, and any chosen `ROS_DOMAIN_ID` or

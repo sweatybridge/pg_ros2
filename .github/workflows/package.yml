@@ -34,8 +34,22 @@ jobs:
         with:
           pg_version: ${{ matrix.pg_version }}
 
+      - name: Install PostgreSQL packaging headers
+        run: |
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -fsSL -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+            https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          . /etc/os-release
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" | sudo tee /etc/apt/sources.list.d/pgdg.list
+          sudo apt-get update
+          sudo apt-get install -y postgresql-server-dev-${{ matrix.pg_version }}
+
       - name: Build extension
-        run: cargo pgrx package --features pg${{ matrix.pg_version }} --no-default-features
+        # Use Debian's pg_config so both the version and package install paths match.
+        run: |
+          cargo pgrx package \
+            --pg-config /usr/lib/postgresql/${{ matrix.pg_version }}/bin/pg_config \
+            --features pg${{ matrix.pg_version }} --no-default-features
 
       - name: Create Debian package
         run: |
@@ -58,7 +72,7 @@ jobs:
           Section: database
           Priority: optional
           Architecture: ${ARCH}
-          Depends: postgresql-${PG_VERSION}
+          Depends: postgresql-${PG_VERSION}, ros-humble-ros-base
           Maintainer: pg_ros2 contributors
           Description: Provides SQL access to ROS2 interfaces, including
            nodes, topics, services, parameters, and actions.
