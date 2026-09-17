@@ -45,6 +45,7 @@ docker run -d --name "$publisher" --network "container:$container" --ipc "contai
     ros2 topic pub /pg_ros2_smoke std_msgs/msg/String '{data: smoke}' >/dev/null
 wait_sql "SELECT EXISTS (SELECT FROM topics WHERE topic_name = '/pg_ros2_smoke' AND message_type = 'std_msgs/msg/String') AND EXISTS (SELECT FROM nodes)"
 docker exec -i -u postgres "$container" /ros_entrypoint.sh python3 - < "$(dirname "$0")/subscriptions-smoke.py"
+docker exec -i -u postgres "$container" /ros_entrypoint.sh python3 - < "$(dirname "$0")/actions-smoke.py"
 docker exec -i -u postgres "$container" /ros_entrypoint.sh python3 - < "$(dirname "$0")/parameters-smoke.py"
 # A blocked write must roll back both tables and be retried after worker restart.
 sql "ALTER TABLE topics ADD CONSTRAINT reject_test_topic CHECK (topic_name <> '/pg_ros2_added')" >/dev/null
