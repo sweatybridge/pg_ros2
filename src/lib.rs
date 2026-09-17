@@ -162,12 +162,34 @@ fn run_observer() -> Result<(), RclrsError> {
     let mut previous_parameters = None;
     let mut parameter_extension = None;
     let mut next_parameters = startup;
+    let mut parameter_poll: Option<parameters::Poll> = None;
     while BackgroundWorker::wait_latch(Some(Duration::ZERO)) {
         // A timeout is the normal end of our bounded spin, not a ROS failure.
         executor
             .spin(SpinOptions::new().timeout(Duration::from_millis(100)))
             .timeout_ok()
             .first_error()?;
+        if let Some(poll) = &mut parameter_poll {
+            let result = poll.tick();
+            if !matches!(result, Ok(None)) {
+                let result = result.map(Option::unwrap);
+                parameter_extension = BackgroundWorker::transaction(|| {
+                    parameters::persist(
+                        result.as_deref().map_err(String::as_str),
+                        previous_parameters.as_deref(),
+                        parameter_extension,
+                    )
+                });
+                match result {
+                    Ok(snapshot) => previous_parameters = Some(snapshot),
+                    Err(error) => {
+                        pgrx::warning!("pg_ros2 event=parameter_discovery_failed error={}", error)
+                    }
+                }
+                parameter_poll = None;
+                next_parameters = Instant::now() + Duration::from_secs(5);
+            }
+        }
         if Instant::now() < startup || !dirty.swap(false, Ordering::AcqRel) {
             continue;
         }
@@ -186,24 +208,20 @@ fn run_observer() -> Result<(), RclrsError> {
         });
         if installed.is_some() {
             if let Ok(snapshot) = snapshot {
-                if Instant::now() >= next_parameters {
-                    let parameters = parameters::read(&node, &mut executor, &snapshot.nodes);
-                    parameter_extension = BackgroundWorker::transaction(|| {
-                        parameters::persist(
-                            parameters.as_deref().map_err(String::as_str),
-                            previous_parameters.as_deref(),
-                            parameter_extension,
-                        )
-                    });
-                    if let Err(message) = &parameters {
-                        pgrx::warning!(
-                            "pg_ros2 event=parameter_discovery_failed error={}",
-                            message
-                        );
-                    } else {
-                        previous_parameters = parameters.ok();
+                if parameter_poll.is_none() && Instant::now() >= next_parameters {
+                    match parameters::Poll::start(&node, &snapshot.nodes) {
+                        Ok(poll) => parameter_poll = Some(poll),
+                        Err(error) => {
+                            parameter_extension = BackgroundWorker::transaction(|| {
+                                parameters::persist(
+                                    Err(&error),
+                                    previous_parameters.as_deref(),
+                                    parameter_extension,
+                                )
+                            });
+                            next_parameters = Instant::now() + Duration::from_secs(5);
+                        }
                     }
-                    next_parameters = Instant::now() + Duration::from_secs(5);
                 }
                 previous = Some(snapshot);
             }
@@ -212,6 +230,7 @@ fn run_observer() -> Result<(), RclrsError> {
             previous = None;
             previous_parameters = None;
             parameter_extension = None;
+            parameter_poll = None;
             if !waiting_logged {
                 pgrx::log!("pg_ros2 event=waiting_for_extension hint=run_CREATE_EXTENSION_pg_ros2_in_configured_database");
                 waiting_logged = true;
