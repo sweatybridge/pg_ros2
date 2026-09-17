@@ -36,6 +36,14 @@ dynamic JSON conversion of nested messages, arrays, sequences, and byte limits.
 They also cover all ROS parameter value types and parameter snapshot reconciliation.
 `scripts/parameters-smoke.py` checks initial parameter discovery, updates, declarations,
 removals, service timeouts with snapshot preservation, recovery, and node removal.
+`scripts/actions-smoke.py` checks transactional submission, pre-dispatch cancellation,
+feedback, terminal results, rejected goals, concurrent goals, cancellation rejection,
+worker restart without duplicate dispatch, uncertain outcomes, privileges, and
+cancellation while a parameter service is unresponsive.
+After `cargo pgrx test`, run `bash scripts/actions-test.sh` in the sourced Humble
+environment to execute the action and parameter smoke suites in a temporary cluster.
+CI runs this harness too. Override `PG_ROS2_TEST_PORT` / `PG_ROS2_TEST_DOMAIN` when
+running multiple harnesses concurrently. The script removes only its temporary cluster.
 
 Use the release profile for tests and packages. rclrs 0.7.0 vendors some interfaces
 from newer ROS distributions (for example `SetLoggerLevelsResult`), whose native
@@ -125,7 +133,17 @@ are excluded, and duplicate fully qualified node names are queried once.
 
 Parameter discovery is a readiness/list/get state machine advanced once per
 observer iteration. It never spins its own executor or waits on a response; graph
-refresh continues between its three-second stage deadlines.
+refresh and the action bridge continue between its three-second stage deadlines.
+
+The action bridge uses the same worker, node, and executor. It resolves its table
+schema from `pg_extension`, keeps at most 64 live goal transports, and clears its
+in-memory state when the extension OID changes. It commits send intent before any
+ROS request. Callback state contains only coalesced feedback/status, and all SPI
+writes happen on the PostgreSQL thread. Generated SendGoal/GetResult services and
+the standard CancelGoal service preserve caller-selected UUIDs; rclrs's high-level
+`request_goal` API generates a new UUID and cannot implement recovery by itself.
+The first adapter is Fibonacci. Adding registered action types requires an adapter,
+input validation, installed Humble interfaces, and lifecycle smoke coverage.
 
 ## CI and releases
 

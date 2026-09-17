@@ -110,8 +110,80 @@ A failed poll preserves the entire last parameter snapshot and records an error
 in `parameter_status`; graph updates continue. Check its `last_checked` and
 `last_error` before relying on parameter values. `last_refreshed` is the last saved
 snapshot time. Parameter polling advances asynchronously between executor spins,
-so an unavailable parameter service does not block graph refreshes. Remote parameters
-may contain secrets; grant table access accordingly.
+so an unavailable parameter service does not block action processing or graph
+refreshes. Remote parameters may contain secrets; grant table access accordingly.
+
+## Run ROS actions through a durable table
+
+The existing background worker dispatches and monitors actions. No extra worker,
+execution connection per goal, or `pg_durable` installation is required. The first
+registered action type is `example_interfaces/action/Fibonacci`; other action
+types are rejected before queuing. Arbitrary runtime action types are not yet supported.
+
+Run these setup statements as the extension administrator, granting only to a
+trusted operator role:
+
+```sql
+GRANT USAGE ON SCHEMA public TO ros_operator;
+GRANT SELECT ON public.action_goals TO ros_operator;
+GRANT EXECUTE ON FUNCTION public.send_goal(text, text, jsonb) TO ros_operator;
+GRANT EXECUTE ON FUNCTION public.cancel_goal(uuid) TO ros_operator;
+```
+
+Use the actual extension schema in place of `public`. The functions are restricted
+`SECURITY DEFINER` entry points with a fixed search path. An authorized operator
+can submit goals and cancel **any** unfinished goal in this database; there is no
+per-user goal isolation. Ordinary readers need only schema USAGE and table SELECT.
+Do not grant direct table writes to operators. `submitted_by` records the session
+login role, including when the session uses `SET ROLE`.
+
+```sql
+SELECT send_goal('/fibonacci', 'example_interfaces/action/Fibonacci',
+                 '{"order": 10}'::jsonb); -- save the returned UUID
+
+SELECT goal_id, desired_state, dispatch_state, observed_state,
+       feedback, result, cancel_response, last_error, completed_at
+FROM action_goals WHERE goal_id = '<goal_uuid>';
+
+SELECT cancel_goal('<goal_uuid>');
+```
+
+Submission and cancellation become visible only on commit and roll back with the
+caller transaction. The worker checks for changes between 100 ms executor spins.
+It handles up to 64 unfinished goals, in creation order; additional goals remain
+queued. ROS discovery, SQL lock waits, and native ROS operations can add latency.
+An unavailable server leaves a new goal pending. Monitor `worker_status` as well
+as the goal row to distinguish a pending operation from a stopped worker.
+
+`desired_state` is the caller's intent; `observed_state` is the latest ROS state.
+`cancel_goal` returns whether it found an unfinished goal, not whether the robot
+has stopped. ROS can reject cancellation or complete first. A goal canceled before
+dispatch gets `dispatch_state = 'canceled'` and `completed_at`, while its ROS state
+remains `unknown` because it was never sent. Rejected goals are also completed
+without an observed ROS state. Accepted goals complete when their result response
+is saved, not merely when terminal status telemetry arrives.
+
+Feedback is coalesced to the latest received value; it is not a replayable event
+log. Fibonacci feedback exceeding 16,384 sequence elements is omitted. Native ROS
+reception and result conversion allocate before persistence, so ROS peers remain
+inside the trust boundary. Terminal results stay in the table until an administrator
+removes them. This table is durable application state, unlike the graph snapshots.
+
+Before sending, the worker commits `dispatch_state = 'uncertain'` and then sends
+the persisted UUID. On restart it asks for that UUID's result and resumes status,
+feedback, and cancellation monitoring. It **never automatically resends an
+uncertain or previously accepted goal**, even if the server says it is unknown.
+Clients reconnect periodically to recover lost replies. Result retention on the
+remote server must cover expected outages. Server restart or cache expiry can make
+an outcome unknowable; `last_error` records this and the goal remains unfinished.
+Such goals consume active slots. An administrator must verify the physical outcome
+before archiving an unresolved row or issuing a replacement goal. Dropping the
+extension/database or deleting unfinished rows loses this reconciliation intent
+and does not cancel the robot.
+
+`pg_durable` can optionally orchestrate several goals and SQL operations, with each
+goal UUID recorded by the workflow. Canceling a workflow with `df.cancel()` does
+not cancel its ROS goals; use `cancel_goal()` explicitly.
 
 ## Subscribe to ROS messages with LISTEN / NOTIFY
 

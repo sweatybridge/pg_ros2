@@ -12,6 +12,7 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
+mod actions;
 mod parameters;
 mod subscriptions;
 
@@ -163,12 +164,14 @@ fn run_observer() -> Result<(), RclrsError> {
     let mut parameter_extension = None;
     let mut next_parameters = startup;
     let mut parameter_poll: Option<parameters::Poll> = None;
+    let mut actions = actions::Bridge::default();
     while BackgroundWorker::wait_latch(Some(Duration::ZERO)) {
         // A timeout is the normal end of our bounded spin, not a ROS failure.
         executor
             .spin(SpinOptions::new().timeout(Duration::from_millis(100)))
             .timeout_ok()
             .first_error()?;
+        actions.tick(&node);
         if let Some(poll) = &mut parameter_poll {
             let result = poll.tick();
             if !matches!(result, Ok(None)) {

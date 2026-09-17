@@ -40,6 +40,9 @@ jobs:
         # Release LTO removes rclrs bindings for interfaces unavailable in Humble.
         run: cargo pgrx test pg${{ matrix.pg_version }} --release --no-default-features
 
+      - name: Action and parameter integration tests
+        run: bash scripts/actions-test.sh "$(cargo pgrx info pg-config pg${{ matrix.pg_version }})"
+
   bench:
     runs-on: ubuntu-22.04
     continue-on-error: true
