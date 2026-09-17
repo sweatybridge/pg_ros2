@@ -1,8 +1,7 @@
 //! Read-only snapshots of remote parameter services. No PostgreSQL calls while spinning.
-use pgrx::bgworkers::BackgroundWorker;
 use pgrx::prelude::*;
 use rclrs::vendor::rcl_interfaces::{msg::ParameterValue, srv::*};
-use rclrs::{Executor, Node, Promise, RclrsErrorFilter, SpinOptions};
+use rclrs::{Client, Node, Promise};
 use serde_json::{json, Value};
 use std::time::{Duration, Instant};
 
@@ -31,143 +30,173 @@ fn value(parameter: ParameterValue) -> Result<(&'static str, Value), String> {
     })
 }
 
-fn spin_until(
-    executor: &mut Executor,
-    stage: &str,
-    mut ready: impl FnMut() -> Result<bool, String>,
-) -> Result<(), String> {
-    let deadline = Instant::now() + Duration::from_secs(3);
-    loop {
-        if !BackgroundWorker::wait_latch(Some(Duration::ZERO)) {
-            return Err("parameter discovery interrupted by shutdown".into());
-        }
-        if ready()? {
-            return Ok(());
-        }
-        if Instant::now() >= deadline {
-            return Err(format!("parameter {stage} timed out after 3 seconds"));
-        }
-        executor
-            .spin(SpinOptions::new().timeout(Duration::from_millis(100)))
-            .timeout_ok()
-            .first_error()
-            .map_err(|error| error.to_string())?;
-    }
+type Peer = (
+    String,
+    String,
+    Client<ListParameters>,
+    Client<GetParameters>,
+);
+
+enum Stage {
+    Ready,
+    Listing(
+        Vec<Promise<ListParameters_Response>>,
+        Vec<Option<ListParameters_Response>>,
+    ),
+    Getting(
+        Vec<Promise<GetParameters_Response>>,
+        Vec<Option<GetParameters_Response>>,
+        Vec<Vec<String>>,
+    ),
 }
 
-fn responses<T>(
-    executor: &mut Executor,
-    mut pending: Vec<Promise<T>>,
-    stage: &str,
-) -> Result<Vec<T>, String> {
-    let mut results: Vec<Option<T>> = (0..pending.len()).map(|_| None).collect();
-    spin_until(executor, stage, || {
-        for (promise, result) in pending.iter_mut().zip(&mut results) {
-            if result.is_none() {
-                *result = promise.try_recv().map_err(|error| error.to_string())?;
-            }
-        }
-        Ok(results.iter().all(Option::is_some))
-    })?;
-    Ok(results.into_iter().map(Option::unwrap).collect())
+/// One poll advanced by the observer loop. No method spins or waits for a peer.
+pub(crate) struct Poll {
+    clients: Vec<Peer>,
+    stage: Stage,
+    deadline: Instant,
 }
 
-pub(crate) fn read(
-    node: &Node,
-    executor: &mut Executor,
-    nodes: &[(String, String)],
-) -> Result<Vec<Parameter>, String> {
-    let mut peers = nodes.to_vec();
-    peers.sort();
-    peers.dedup();
-    let mut clients = Vec::new();
-    for (name, namespace) in peers {
-        let prefix = format!("{}/{name}", namespace.trim_end_matches('/'));
-        let services = node
-            .get_service_names_and_types_by_node(&name, &namespace)
-            .map_err(|error| error.to_string())?;
-        let list = format!("{prefix}/list_parameters");
-        let get = format!("{prefix}/get_parameters");
-        // Nodes may intentionally disable parameter services.
-        if !services.get(&list).is_some_and(|types| {
-            types
-                .iter()
-                .any(|kind| kind == "rcl_interfaces/srv/ListParameters")
-        }) {
-            continue;
+fn collect<T>(pending: &mut [Promise<T>], results: &mut [Option<T>]) -> Result<bool, String> {
+    for (promise, result) in pending.iter_mut().zip(results.iter_mut()) {
+        if result.is_none() {
+            *result = promise.try_recv().map_err(|error| error.to_string())?;
         }
-        let list_client = node
-            .create_client::<ListParameters>(list.as_str())
-            .map_err(|error| error.to_string())?;
-        let get_client = node
-            .create_client::<GetParameters>(get.as_str())
-            .map_err(|error| error.to_string())?;
-        clients.push((name, namespace, list_client, get_client));
     }
-    // All peers share each deadline; an unreachable peer cannot add an unbounded
-    // per-node wait. Dropping clients on failure also releases pending requests.
-    spin_until(executor, "service discovery", || {
-        for (_, _, list, get) in &clients {
-            if !list.service_is_ready().map_err(|error| error.to_string())?
-                || !get.service_is_ready().map_err(|error| error.to_string())?
-            {
-                return Ok(false);
+    Ok(results.iter().all(Option::is_some))
+}
+
+impl Poll {
+    pub(crate) fn start(node: &Node, nodes: &[(String, String)]) -> Result<Self, String> {
+        let mut peers = nodes.to_vec();
+        peers.sort();
+        peers.dedup();
+        let mut clients = Vec::new();
+        for (name, namespace) in peers {
+            let prefix = format!("{}/{name}", namespace.trim_end_matches('/'));
+            let services = node
+                .get_service_names_and_types_by_node(&name, &namespace)
+                .map_err(|error| error.to_string())?;
+            let list = format!("{prefix}/list_parameters");
+            let get = format!("{prefix}/get_parameters");
+            if !services.get(&list).is_some_and(|types| {
+                types
+                    .iter()
+                    .any(|kind| kind == "rcl_interfaces/srv/ListParameters")
+            }) {
+                continue;
             }
-        }
-        Ok(true)
-    })?;
-    let pending = clients
-        .iter()
-        .map(|(_, _, list, _)| {
-            list.call(&ListParameters_Request {
-                prefixes: vec![],
-                depth: 0,
-            })
-            .map_err(|error| error.to_string())
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let lists: Vec<ListParameters_Response> = responses(executor, pending, "list")?;
-    let names: Vec<Vec<String>> = lists
-        .into_iter()
-        .map(|list| {
-            let mut names = list.result.names;
-            names.sort();
-            names.dedup();
-            names
-        })
-        .collect();
-    let pending = clients
-        .iter()
-        .zip(&names)
-        .map(|((_, _, _, get), names)| {
-            get.call(&GetParameters_Request {
-                names: names.clone(),
-            })
-            .map_err(|error| error.to_string())
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let values: Vec<GetParameters_Response> = responses(executor, pending, "get")?;
-    let mut snapshot = Vec::new();
-    for (((name, namespace, _, _), names), response) in clients.into_iter().zip(names).zip(values) {
-        if names.len() != response.values.len() {
-            return Err(format!(
-                "{namespace}/{name}: parameter response length mismatch"
+            clients.push((
+                name,
+                namespace,
+                node.create_client::<ListParameters>(list.as_str())
+                    .map_err(|e| e.to_string())?,
+                node.create_client::<GetParameters>(get.as_str())
+                    .map_err(|e| e.to_string())?,
             ));
         }
-        for (parameter_name, parameter_value) in names.into_iter().zip(response.values) {
-            let (kind, value) = value(parameter_value)?;
-            snapshot.push(Parameter {
-                node: name.clone(),
-                namespace: namespace.clone(),
-                name: parameter_name,
-                kind,
-                value,
-            });
-        }
+        Ok(Self {
+            clients,
+            stage: Stage::Ready,
+            deadline: Instant::now() + Duration::from_secs(3),
+        })
     }
-    Ok(snapshot)
-}
 
+    pub(crate) fn tick(&mut self) -> Result<Option<Vec<Parameter>>, String> {
+        if Instant::now() >= self.deadline {
+            let stage = match self.stage {
+                Stage::Ready => "service discovery",
+                Stage::Listing(..) => "list",
+                Stage::Getting(..) => "get",
+            };
+            return Err(format!("parameter {stage} timed out after 3 seconds"));
+        }
+        match &mut self.stage {
+            Stage::Ready => {
+                for (_, _, list, get) in &self.clients {
+                    if !list.service_is_ready().map_err(|e| e.to_string())?
+                        || !get.service_is_ready().map_err(|e| e.to_string())?
+                    {
+                        return Ok(None);
+                    }
+                }
+                let pending = self
+                    .clients
+                    .iter()
+                    .map(|(_, _, list, _)| {
+                        list.call(&ListParameters_Request {
+                            prefixes: vec![],
+                            depth: 0,
+                        })
+                        .map_err(|e| e.to_string())
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                self.stage =
+                    Stage::Listing(pending, (0..self.clients.len()).map(|_| None).collect());
+                self.deadline = Instant::now() + Duration::from_secs(3);
+            }
+            Stage::Listing(pending, results) => {
+                if !collect(pending, results)? {
+                    return Ok(None);
+                }
+                let names: Vec<Vec<String>> = results
+                    .iter_mut()
+                    .map(|result| {
+                        let mut names = result.take().unwrap().result.names;
+                        names.sort();
+                        names.dedup();
+                        names
+                    })
+                    .collect();
+                let pending = self
+                    .clients
+                    .iter()
+                    .zip(&names)
+                    .map(|((_, _, _, get), names)| {
+                        get.call(&GetParameters_Request {
+                            names: names.clone(),
+                        })
+                        .map_err(|e| e.to_string())
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                self.stage = Stage::Getting(
+                    pending,
+                    (0..self.clients.len()).map(|_| None).collect(),
+                    names,
+                );
+                self.deadline = Instant::now() + Duration::from_secs(3);
+            }
+            Stage::Getting(pending, results, names) => {
+                if !collect(pending, results)? {
+                    return Ok(None);
+                }
+                let mut snapshot = Vec::new();
+                for (((name, namespace, _, _), names), response) in
+                    self.clients.iter().zip(names).zip(results)
+                {
+                    let response = response.take().unwrap();
+                    if names.len() != response.values.len() {
+                        return Err(format!(
+                            "{namespace}/{name}: parameter response length mismatch"
+                        ));
+                    }
+                    for (parameter_name, parameter_value) in names.iter().zip(response.values) {
+                        let (kind, value) = value(parameter_value)?;
+                        snapshot.push(Parameter {
+                            node: name.clone(),
+                            namespace: namespace.clone(),
+                            name: parameter_name.clone(),
+                            kind,
+                            value,
+                        });
+                    }
+                }
+                return Ok(Some(snapshot));
+            }
+        }
+        Ok(None)
+    }
+}
 pub(crate) fn persist(
     snapshot: Result<&[Parameter], &str>,
     previous: Option<&[Parameter]>,

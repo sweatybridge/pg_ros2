@@ -109,8 +109,9 @@ deadline across all peers. Shutdown is checked between 100 ms executor spins.
 A failed poll preserves the entire last parameter snapshot and records an error
 in `parameter_status`; graph updates continue. Check its `last_checked` and
 `last_error` before relying on parameter values. `last_refreshed` is the last saved
-snapshot time. Parameter polling may delay the next graph refresh by up to these
-deadlines. Remote parameters may contain secrets; grant table access accordingly.
+snapshot time. Parameter polling advances asynchronously between executor spins,
+so an unavailable parameter service does not block graph refreshes. Remote parameters
+may contain secrets; grant table access accordingly.
 
 ## Subscribe to ROS messages with LISTEN / NOTIFY
 

@@ -123,6 +123,10 @@ does not prevent graph discovery. This is a full-domain snapshot: one failed pee
 preserves all prior parameter rows. Nodes without advertised parameter list services
 are excluded, and duplicate fully qualified node names are queried once.
 
+Parameter discovery is a readiness/list/get state machine advanced once per
+observer iteration. It never spins its own executor or waits on a response; graph
+refresh continues between its three-second stage deadlines.
+
 ## CI and releases
 
 The Package workflow runs when `Cargo.toml` changes on `main`, or when dispatched
