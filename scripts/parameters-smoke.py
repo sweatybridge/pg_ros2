@@ -1,4 +1,4 @@
-"""Run as postgres in a sourced ROS environment, against graph_test/ros_graph."""
+"""Run as postgres in a sourced ROS environment, against graph_test/ros2."""
 import json
 import subprocess
 import threading
@@ -12,7 +12,7 @@ from rclpy.parameter import Parameter
 def sql(statement):
     return subprocess.check_output(
         ["psql", "-X", "-d", "graph_test", "-v", "ON_ERROR_STOP=1", "-Atc",
-         "SET search_path=ros_graph,pg_catalog; " + statement],
+         "SET search_path=ros2,pg_catalog; " + statement],
         text=True, timeout=10,
     ).strip().removeprefix("SET\n")
 

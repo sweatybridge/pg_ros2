@@ -13,7 +13,7 @@ cleanup() {
     docker rm -f "$extra" "$publisher" "$container" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
-# Test a non-default database and schema, including startup before installation.
+# Test a non-default database and the fixed extension schema, including startup before installation.
 docker run -d --name "$container" --ipc=shareable -e ROS_DOMAIN_ID=73 "$image" \
     postgres -c shared_preload_libraries=pg_ros2,pg_durable \
     -c pg_ros2.database=graph_test -c pg_durable.database=graph_test >/dev/null
@@ -23,7 +23,7 @@ for _ in {1..60}; do
 done
 docker exec -u postgres "$container" psql -v ON_ERROR_STOP=1 -c 'CREATE DATABASE graph_test'
 sql() {
-    docker exec -u postgres -e PGOPTIONS=-csearch_path=ros_graph,pg_catalog "$container" \
+    docker exec -u postgres -e PGOPTIONS=-csearch_path=ros2,pg_catalog "$container" \
         psql -d graph_test -v ON_ERROR_STOP=1 -Atc "$1"
 }
 wait_sql() {
@@ -34,11 +34,11 @@ wait_sql() {
     echo "Timed out: $1" >&2
     return 1
 }
-sql 'CREATE SCHEMA ros_graph; CREATE EXTENSION pg_ros2 SCHEMA ros_graph' >/dev/null
+sql 'CREATE EXTENSION pg_ros2' >/dev/null
 sql 'CREATE EXTENSION pg_durable' >/dev/null
 wait_sql 'SELECT EXISTS (SELECT FROM worker_status WHERE last_refreshed IS NOT NULL AND last_error IS NULL)'
 [[ $(sql "SELECT count(*) = 0 FROM nodes WHERE node_name LIKE 'pg_ros2_worker_%'") == t ]]
-[[ $(sql "SELECT to_regprocedure('ros_graph.ros2_nodes(integer)') IS NULL AND to_regprocedure('ros_graph.refresh_nodes(integer)') IS NULL") == t ]]
+[[ $(sql "SELECT to_regprocedure('ros2.ros2_nodes(integer)') IS NULL AND to_regprocedure('ros2.refresh_nodes(integer)') IS NULL") == t ]]
 # Share IPC as well as networking so Fast DDS shared-memory transport works.
 docker run -d --name "$publisher" --network "container:$container" --ipc "container:$container" --user postgres \
     -e ROS_DOMAIN_ID=73 --entrypoint /ros_entrypoint.sh "$image" \
@@ -68,13 +68,13 @@ done
 sql 'ALTER TABLE topics DROP CONSTRAINT reject_test_topic' >/dev/null
 wait_sql "SELECT EXISTS (SELECT FROM topics WHERE topic_name = '/pg_ros2_added') AND (SELECT last_error IS NULL FROM worker_status)"
 # Readers need only SELECT, and reads never create ROS nodes.
-sql 'CREATE ROLE graph_reader; GRANT USAGE ON SCHEMA ros_graph TO graph_reader; GRANT SELECT ON nodes, topics, parameters, worker_status, parameter_status TO graph_reader' >/dev/null
+sql 'CREATE ROLE graph_reader; GRANT USAGE ON SCHEMA ros2 TO graph_reader; GRANT SELECT ON ros2.nodes, ros2.topics, ros2.parameters, ros2.worker_status, ros2.parameter_status TO graph_reader' >/dev/null
 sql 'SET ROLE graph_reader; SELECT count(*) FROM nodes; SELECT count(*) FROM topics; SELECT count(*) FROM parameters' >/dev/null
 # Removing external publishers must remove their graph records automatically.
 docker stop -t 5 "$extra" "$publisher" >/dev/null
 wait_sql "SELECT NOT EXISTS (SELECT FROM topics WHERE topic_name IN ('/pg_ros2_smoke', '/pg_ros2_added')) AND NOT EXISTS (SELECT FROM nodes)"
 # Reinstall without a graph change must still initialize the new tables.
-sql 'DROP EXTENSION pg_ros2; CREATE EXTENSION pg_ros2 SCHEMA ros_graph' >/dev/null
+sql 'DROP EXTENSION pg_ros2; CREATE EXTENSION pg_ros2' >/dev/null
 wait_sql 'SELECT EXISTS (SELECT FROM worker_status WHERE last_refreshed IS NOT NULL)'
 # A PostgreSQL restart must initialize the saved snapshot again.
 sql "INSERT INTO nodes VALUES ('stale_before_restart', '/', now())" >/dev/null

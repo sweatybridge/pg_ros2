@@ -329,6 +329,14 @@ fn hello_pg_ros2() -> &'static str {
     "Hello, pg_ros2"
 }
 
+/// Put the extension schema on the search path so test SQL can use plain table
+/// names; the control file pins that schema to `ros2`.
+#[cfg(any(test, feature = "pg_test"))]
+pub(crate) fn use_extension_schema() {
+    let (_, schema) = installed_extension().expect("pg_ros2 is installed");
+    Spi::run(&format!("SET LOCAL search_path = {schema}, pg_catalog")).unwrap();
+}
+
 #[cfg(any(test, feature = "pg_test"))]
 #[pg_schema]
 mod tests {
@@ -336,6 +344,7 @@ mod tests {
 
     #[pg_test]
     fn test_snapshot_reconciliation() {
+        use_extension_schema();
         let first = GraphSnapshot {
             nodes: vec![
                 ("duplicate".into(), "/".into()),

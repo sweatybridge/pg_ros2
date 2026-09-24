@@ -90,7 +90,8 @@ and versioned SQL files beneath `/usr/share/postgresql/18/extension`. Copy that 
 into the same paths on a matching Ubuntu 22.04 amd64 / PostgreSQL 18 host with the
 same Humble runtime packages installed. The archive does not bundle ROS libraries
 and is not portable to other PostgreSQL majors or arbitrary Linux distributions.
-After installation, run `CREATE EXTENSION pg_ros2` and the README queries.
+After installation, run `CREATE EXTENSION pg_ros2` (which creates the `ros2`
+schema and installs every entity there) and the README queries.
 
 ## Execution model and limits
 
@@ -119,9 +120,11 @@ by a two-second timeout. PostgreSQL signals are checked between executor spins;
 native ROS setup, graph calls, and teardown can still delay shutdown.
 
 The worker connects as the bootstrap superuser and writes only in the extension
-schema resolved from `pg_extension`. ROS peers and native runtime libraries are
-part of the server trust boundary. Keep write/DDL access to the extension tables
-restricted. Ordinary readers require only schema USAGE and table SELECT privileges.
+schema resolved from `pg_extension`; the control file pins that schema to
+`ros2`, so a `SCHEMA` clause naming anything else is rejected. ROS peers and
+native runtime libraries are part of the server trust boundary. Keep write/DDL
+access to the extension tables restricted. Ordinary readers require only USAGE on
+`ros2` and SELECT on its tables.
 The graph tables are derived caches and are repopulated after server restart.
 
 Parameter polling uses the same observer and executor, outside SQL transactions.

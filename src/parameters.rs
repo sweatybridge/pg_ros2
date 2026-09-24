@@ -280,6 +280,7 @@ mod tests {
 
     #[pg_test]
     fn test_parameter_reconciliation() {
+        crate::use_extension_schema();
         let mut rows = vec![Parameter {
             node: "node'".into(),
             namespace: "/ns".into(),

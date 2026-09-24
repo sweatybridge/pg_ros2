@@ -83,7 +83,7 @@ admin, listener, second_listener, caller = connect(), connect(), connect(), conn
 rclpy.init()
 node = rclpy.create_node("pg_ros2_subscription_smoke")
 caller_pid = int(sql(caller, "SELECT pg_backend_pid()"))
-call = b"CALL ros_graph.subscribe('/pg_ros2_messages')"
+call = b"CALL ros2.subscribe('/pg_ros2_messages')"
 
 
 def rejected(statement, expected):
@@ -115,7 +115,7 @@ def cancel():
 
 
 try:
-    assert sql(admin, "SELECT to_regclass('ros_graph.subscriptions') IS NULL") == "t"
+    assert sql(admin, "SELECT to_regclass('ros2.subscriptions') IS NULL") == "t"
     for conn in (listener, second_listener):
         sql(conn, 'LISTEN "/pg_ros2_messages"')
     sql(caller, "SET statement_timeout = 0")
@@ -123,12 +123,12 @@ try:
     sql(caller, "BEGIN")
     rejected(call.decode(), "outside a transaction block")
     sql(caller, "ROLLBACK")
-    rejected("CALL ros_graph.subscribe('relative')", "fully qualified")
-    rejected("CALL ros_graph.subscribe('/' || repeat('x', 63))", "63-byte")
-    sql(admin, "CREATE ROLE ros_subscriber_test LOGIN; GRANT USAGE ON SCHEMA ros_graph TO ros_subscriber_test")
+    rejected("CALL ros2.subscribe('relative')", "fully qualified")
+    rejected("CALL ros2.subscribe('/' || repeat('x', 63))", "63-byte")
+    sql(admin, "CREATE ROLE ros_subscriber_test LOGIN; GRANT USAGE ON SCHEMA ros2 TO ros_subscriber_test")
     sql(caller, "SET ROLE ros_subscriber_test")
     rejected(call.decode(), "permission denied")
-    sql(admin, "GRANT EXECUTE ON PROCEDURE ros_graph.subscribe(text) TO ros_subscriber_test")
+    sql(admin, "GRANT EXECUTE ON PROCEDURE ros2.subscribe(text) TO ros_subscriber_test")
     # Start before the publisher exists: the call must wait for discovery.
     assert pq.PQsendQuery(caller, call) == 1
     time.sleep(1)
@@ -168,7 +168,7 @@ try:
     # A durable launch must return immediately and stream from its own backend.
     sql(admin, "SELECT df.grant_usage('ros_subscriber_test')")
     notifications(listener)
-    instance = sql(caller, "SELECT df.start($$CALL ros_graph.subscribe('/pg_ros2_messages')$$)")
+    instance = sql(caller, "SELECT df.start($$CALL ros2.subscribe('/pg_ros2_messages')$$)")
     assert instance
     try:
         messages = wait(lambda: notifications(listener), publish)
@@ -179,7 +179,7 @@ try:
         # Stop any in-flight SQL activity as well as canceling its workflow.
         sql(admin, "SELECT pg_cancel_backend(pid) FROM pg_stat_activity "
             "WHERE usename = 'ros_subscriber_test' AND pid <> " + str(caller_pid) +
-            " AND query = $$CALL ros_graph.subscribe('/pg_ros2_messages')$$")
+            " AND query = $$CALL ros2.subscribe('/pg_ros2_messages')$$")
     wait(lambda: publisher.get_subscription_count() == 0)
     print("Subscriptions passed: CALL streams before return, topic/channel identity, "
           "JSON, fan-out, repeated messages, payload limit, permissions, "

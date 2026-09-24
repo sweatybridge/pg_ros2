@@ -13,21 +13,23 @@ shared_preload_libraries = 'pg_ros2'  # append to any existing libraries
 pg_ros2.database = 'postgres'
 ```
 
-Install the extension in the configured database:
+Install the extension in the configured database. Every pg_ros2 entity is
+created in the `ros2` schema, which `CREATE EXTENSION` creates when it is missing:
 
 ```sql
 CREATE EXTENSION pg_ros2;
-SELECT * FROM nodes;
-SELECT * FROM topics;
-SELECT * FROM parameters;
-SELECT * FROM worker_status;
+SELECT * FROM ros2.nodes;
+SELECT * FROM ros2.topics;
+SELECT * FROM ros2.parameters;
+SELECT * FROM ros2.worker_status;
 ```
 
 One worker monitors the server's configured ROS domain in one database. It starts
 after recovery, creates one persistent ROS observer, and begins discovery. It waits
 for `CREATE EXTENSION` to commit if the extension has not been installed yet.
 The tables start empty and are populated asynchronously after an initial one-second
-warm-up. Installing into a custom schema is supported. Changing `pg_ros2.database`
+warm-up. The control file fixes the target schema to `ros2`, so a conflicting
+`SCHEMA` clause is rejected. Changing `pg_ros2.database`
 requires a server restart; the database must exist before the worker can connect.
 
 | Table | Columns |
@@ -63,8 +65,8 @@ PostgreSQL log; no `~/.ros/log` directory is required or written.
 Readers need no ROS access. Grant access as appropriate:
 
 ```sql
-GRANT SELECT ON nodes, topics, parameters, worker_status, parameter_status TO reader_role;
--- Also grant USAGE on the extension schema when needed.
+GRANT USAGE ON SCHEMA ros2 TO reader_role;
+GRANT SELECT ON ros2.nodes, ros2.topics, ros2.parameters, ros2.worker_status, ros2.parameter_status TO reader_role;
 ```
 
 The worker owns synchronization; direct table edits are unsupported. The previous
@@ -77,15 +79,15 @@ a fresh extension installation. No versioned upgrade script is provided yet.
 
 ```sql
 SELECT namespace, node_name, parameter_name, parameter_type, value
-FROM parameters
+FROM ros2.parameters
 ORDER BY namespace, node_name, parameter_name;
 
 SELECT (value #>> '{}')::boolean AS use_sim_time
-FROM parameters
+FROM ros2.parameters
 WHERE namespace = '/' AND node_name = 'my_node'
   AND parameter_name = 'use_sim_time';
 
-SELECT * FROM parameter_status;
+SELECT * FROM ros2.parameter_status;
 ```
 
 The worker polls the standard `list_parameters` and `get_parameters` services,
@@ -130,8 +132,8 @@ launch subscriptions (run these setup statements as the administrator):
 ```sql
 CREATE EXTENSION pg_durable;
 CREATE ROLE ros_subscriber LOGIN;
-GRANT USAGE ON SCHEMA public TO ros_subscriber;
-GRANT EXECUTE ON PROCEDURE public.subscribe(text) TO ros_subscriber;
+GRANT USAGE ON SCHEMA ros2 TO ros_subscriber;
+GRANT EXECUTE ON PROCEDURE ros2.subscribe(text) TO ros_subscriber;
 SELECT df.grant_usage('ros_subscriber');
 ```
 
@@ -139,17 +141,17 @@ Connect as `ros_subscriber`, or use `SET ROLE ros_subscriber` from an administra
 session, and launch the subscription:
 
 ```sql
-SELECT df.start($$CALL public.subscribe('/chatter')$$, 'ROS /chatter');
+SELECT df.start($$CALL ros2.subscribe('/chatter')$$, 'ROS /chatter');
 -- Save the returned instance ID for monitoring and cancellation.
 SELECT df.status('<instance_id>');
 ```
 
 `df.start` returns while the procedure runs in a separate backend. Commit the
 launch before expecting messages. Submit only the `CALL` as the workflow step;
-do not wrap it in `BEGIN`/`COMMIT`. Use the actual extension schema in place of
-`public` if installed elsewhere. Superuser workflow submission stays disabled;
-the login role above has the required privileges. For a custom database, set
-both `pg_ros2.database` and `pg_durable.database` in the server command.
+do not wrap it in `BEGIN`/`COMMIT`. pg_ros2 always installs its entities in the
+`ros2` schema. Superuser workflow submission stays disabled; the login role above
+has the required privileges. For a custom database, set both `pg_ros2.database`
+and `pg_durable.database` in the server command.
 
 To stop a subscription, cancel its workflow as the submitting role:
 
@@ -163,7 +165,7 @@ the workflow:
 ```sql
 SELECT pg_cancel_backend(pid) FROM pg_stat_activity
 WHERE usename = 'ros_subscriber'
-  AND query = $$CALL public.subscribe('/chatter')$$;
+  AND query = $$CALL ros2.subscribe('/chatter')$$;
 ```
 
 Workflow persistence does not persist ROS messages: an interrupted subscription
@@ -175,7 +177,7 @@ Alternatively, run the procedure directly in a separate, dedicated connection:
 ```sql
 SET statement_timeout = 0;
 SET client_connection_check_interval = '1s';
-CALL subscribe('/chatter');
+CALL ros2.subscribe('/chatter');
 ```
 
 `CALL` runs indefinitely until canceled or an error occurs. Run it in your client's
@@ -224,8 +226,8 @@ The procedure loads native ROS libraries, so execution is restricted by default.
 Grant it only to trusted roles:
 
 ```sql
-GRANT EXECUTE ON PROCEDURE subscribe(text) TO ros_subscriber;
--- Also grant USAGE on the extension schema when needed.
+GRANT EXECUTE ON PROCEDURE ros2.subscribe(text) TO ros_subscriber;
+-- Also grant USAGE ON SCHEMA ros2 when needed.
 ```
 
 PostgreSQL notification channels have **no per-channel access controls**: any user
@@ -253,8 +255,8 @@ docker run --rm -d --name pg-ros2 -e ROS_DOMAIN_ID=42 pg-ros2:humble
 # Wait for PostgreSQL to report that it is ready before running SQL.
 docker exec -u postgres pg-ros2 psql -v ON_ERROR_STOP=1 -c 'CREATE EXTENSION pg_ros2'
 docker exec -u postgres pg-ros2 psql -v ON_ERROR_STOP=1 -c 'CREATE EXTENSION pg_durable'
-docker exec -u postgres pg-ros2 psql -c 'SELECT * FROM worker_status'
-docker exec -u postgres pg-ros2 psql -c 'SELECT * FROM nodes'
+docker exec -u postgres pg-ros2 psql -c 'SELECT * FROM ros2.worker_status'
+docker exec -u postgres pg-ros2 psql -c 'SELECT * FROM ros2.nodes'
 bash scripts/smoke.sh pg-ros2:humble
 docker stop pg-ros2
 ```

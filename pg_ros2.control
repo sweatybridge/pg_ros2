@@ -2,5 +2,6 @@ comment = 'Minimal ROS 2 Humble graph access through rclrs'
 default_version = '@CARGO_VERSION@'
 module_pathname = '$libdir/pg_ros2'
 relocatable = false
+schema = 'ros2'
 superuser = true
 trusted = false
