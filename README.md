@@ -199,7 +199,10 @@ only that listening session; cancel the `CALL` to stop receiving from ROS.
 The procedure waits for the topic to appear, discovers its message type, and creates
 one ROS subscription. Multiple advertised types cause an error. The selected type
 stays fixed for the call's lifetime. Its C introspection and type-support libraries
-must be installed in the database server's sourced ROS environment. This subscription
+must be installed in the database server's sourced ROS environment. rclrs locates
+them through `AMENT_PREFIX_PATH`, which the server reads once at startup, so a
+server started without sourcing ROS fails this `CALL` with `Could not create
+dynamic message` naming the package it could not resolve. This subscription
 runs independently of the graph worker and does not require shared preloading.
 
 Each notification contains JSON:

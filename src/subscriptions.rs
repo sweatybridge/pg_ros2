@@ -69,7 +69,7 @@ fn validate_topic(topic: &str) -> Result<(), &'static str> {
 }
 
 fn receive(topic: &str) -> Result<(), String> {
-    let context = crate::ros_context().map_err(|e| e.to_string())?;
+    let context = crate::ros_context().map_err(|e| crate::describe(&e))?;
     let mut executor = context.create_basic_executor();
     let name = format!("pg_ros2_subscriber_{}", std::process::id());
     let node = executor
@@ -78,7 +78,7 @@ fn receive(topic: &str) -> Result<(), String> {
                 .enable_rosout(false)
                 .start_parameter_services(false),
         )
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| crate::describe(&e))?;
     let (sender, receiver) = sync_channel(256);
     let dropped = Arc::new(AtomicU64::new(0));
     let mut subscription = None;
@@ -93,11 +93,11 @@ fn receive(topic: &str) -> Result<(), String> {
             .spin(SpinOptions::new().timeout(Duration::from_millis(100)))
             .timeout_ok()
             .first_error()
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| crate::describe(&e))?;
         if subscription.is_none() && Instant::now() >= next_discovery {
             let topics = node
                 .get_topic_names_and_types()
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| crate::describe(&e))?;
             if let Some(types) = topics.get(topic) {
                 if types.len() != 1 {
                     return Err(
@@ -108,7 +108,7 @@ fn receive(topic: &str) -> Result<(), String> {
                 let kind = message_type
                     .as_str()
                     .try_into()
-                    .map_err(|e: rclrs::DynamicMessageError| e.to_string())?;
+                    .map_err(|e: rclrs::DynamicMessageError| crate::describe(&e))?;
                 let callback_topic = topic.to_owned();
                 let sender = sender.clone();
                 let dropped = Arc::clone(&dropped);
@@ -129,7 +129,17 @@ fn receive(topic: &str) -> Result<(), String> {
                             }
                         },
                     )
-                    .map_err(|e| e.to_string())?,
+                    .map_err(|e| {
+                        // rclrs loads the type support libraries through
+                        // AMENT_PREFIX_PATH, which is fixed when the server
+                        // starts. Name it, because the bare rclrs message does
+                        // not and the fix is an environment change.
+                        format!(
+                            "{} (message packages are resolved from the database server's \
+                             AMENT_PREFIX_PATH; start the server with the ROS environment sourced)",
+                            crate::describe(&e)
+                        )
+                    })?,
                 );
                 pgrx::notice!("subscribed to {}; cancel this CALL to stop", topic);
             }

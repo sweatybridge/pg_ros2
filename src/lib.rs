@@ -5,7 +5,8 @@ use rclrs::{
     Context, CreateBasicExecutor, InitOptions, IntoNodeOptions, Node, RclrsError, RclrsErrorFilter,
     SpinOptions,
 };
-use std::ffi::{CStr, CString, c_char};
+use std::error::Error;
+use std::ffi::{c_char, CStr, CString};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -100,7 +101,7 @@ pub extern "C-unwind" fn graph_worker_main(_arg: pg_sys::Datum) {
     pgrx::log!("pg_ros2 event=worker_started database={}", database);
     // run_observer owns all ROS resources, so they drop before reporting an error.
     if let Err(err) = run_observer() {
-        let message = err.to_string();
+        let message = describe(&err);
         BackgroundWorker::transaction(|| {
             persist_snapshot(Err(message.as_str()), None, None);
         });
@@ -176,6 +177,24 @@ fn rmw_implementation() -> String {
     }
 }
 
+/// Render an error together with its causes.
+///
+/// rclrs keeps its top-level messages deliberately terse: a failed dynamic
+/// message always prints as "Could not create dynamic message". The actionable
+/// reason is carried in the `source` chain, for example a message package that
+/// `AMENT_PREFIX_PATH` cannot resolve, so include that chain in every
+/// operator-facing message.
+pub(crate) fn describe(error: &dyn Error) -> String {
+    let mut message = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        message.push_str(": ");
+        message.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    message
+}
+
 fn run_observer() -> Result<(), RclrsError> {
     let context = ros_context()?;
     // Record the DDS domain the observer actually joined. It comes from the
@@ -242,7 +261,7 @@ fn run_observer() -> Result<(), RclrsError> {
             continue;
         }
         let snapshot = GraphSnapshot::read(&node);
-        let error = snapshot.as_ref().err().map(ToString::to_string);
+        let error = snapshot.as_ref().err().map(|err| describe(err));
         if error != last_error {
             if let Some(message) = &error {
                 pgrx::warning!("pg_ros2 event=discovery_failed error={}", message);
