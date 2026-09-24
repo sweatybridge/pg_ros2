@@ -3,8 +3,7 @@ mod json;
 
 use pgrx::prelude::*;
 use rclrs::{
-    Context, CreateBasicExecutor, InitOptions, IntoNodeOptions, IntoPrimitiveOptions,
-    RclrsErrorFilter, SpinOptions,
+    CreateBasicExecutor, IntoNodeOptions, IntoPrimitiveOptions, RclrsErrorFilter, SpinOptions,
 };
 use std::sync::{
     atomic::{AtomicU64, Ordering},
@@ -70,7 +69,7 @@ fn validate_topic(topic: &str) -> Result<(), &'static str> {
 }
 
 fn receive(topic: &str) -> Result<(), String> {
-    let context = Context::new([], InitOptions::default()).map_err(|e| e.to_string())?;
+    let context = crate::ros_context().map_err(|e| e.to_string())?;
     let mut executor = context.create_basic_executor();
     let name = format!("pg_ros2_subscriber_{}", std::process::id());
     let node = executor

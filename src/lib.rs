@@ -136,8 +136,28 @@ impl GraphSnapshot {
     }
 }
 
+/// Create a ROS context for a forked PostgreSQL process.
+///
+/// Creating a context also configures rcl's logging backend. The default
+/// external library, rcl_logging_spdlog, resolves its directory from
+/// `ROS_LOG_DIR`, then `ROS_HOME`, then `~/.ros`, and `rcutils_expand_user`
+/// fails when the process has no usable `HOME`. That is the normal state of a
+/// server started by systemd or a container, and the failure surfaces as
+/// `RCL_LOGGING_RET_ERROR`, which is numerically `RCL_RET_TIMEOUT` (2). The
+/// context creation then fails with the misleading
+/// `Timeout occurred (RCL_RET_TIMEOUT)` observed in the server log.
+///
+/// PostgreSQL is this extension's log sink, so ask rcl to skip the external
+/// library instead of depending on the server's environment. The console
+/// handler stays enabled, so ROS messages still reach the server log, and
+/// `rcl_logging_fini` skips the external shutdown.
+pub(crate) fn ros_context() -> Result<Context, RclrsError> {
+    let args = ["--ros-args", "--disable-external-lib-logs"].map(str::to_owned);
+    Context::new(args, InitOptions::default())
+}
+
 fn run_observer() -> Result<(), RclrsError> {
-    let context = Context::new([], InitOptions::default())?;
+    let context = ros_context()?;
     let mut executor = context.create_basic_executor();
     let name = format!("pg_ros2_worker_{}", std::process::id());
     let node = executor.create_node(

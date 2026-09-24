@@ -56,7 +56,9 @@ snapshot. An empty status table means the worker has not reached it yet.
 ROS discovery errors are recorded in `last_error`; SQL errors and startup failures
 are logged by PostgreSQL and can leave `last_checked` stale. The postmaster retries
 failed workers after five seconds. Inspect `pg_stat_activity` for backend type
-`pg_ros2 graph worker` and PostgreSQL logs for details.
+`pg_ros2 graph worker` and PostgreSQL logs for details. The extension disables
+ROS file logging, so ROS console messages and these diagnostics share the
+PostgreSQL log; no `~/.ros/log` directory is required or written.
 
 Readers need no ROS access. Grant access as appropriate:
 

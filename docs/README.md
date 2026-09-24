@@ -61,12 +61,22 @@ runner's transaction because it requires a top-level, non-atomic call.
 For a server installed separately, start PostgreSQL from an environment which has
 sourced Humble's `setup.bash`. That environment supplies `LD_LIBRARY_PATH`,
 `AMENT_PREFIX_PATH`, `ROS_DISTRO`, and any chosen `ROS_DOMAIN_ID` or
-`RMW_IMPLEMENTATION`. Set a writable `ROS_LOG_DIR` if the server user's home is not
-writable. A systemd service does not inherit your interactive shell's environment;
-use a service wrapper that sources the ROS setup before executing PostgreSQL.
-Add `pg_ros2` to `shared_preload_libraries`, set `pg_ros2.database` to the target
-database (default `postgres`), and restart the server. The Docker runtime enables
-preloading in its default command. Allow one slot in `max_worker_processes`.
+`RMW_IMPLEMENTATION`. A systemd service does not inherit your interactive shell's
+environment; use a service wrapper that sources the ROS setup before executing
+PostgreSQL. Add `pg_ros2` to `shared_preload_libraries`, set `pg_ros2.database` to
+the target database (default `postgres`), and restart the server. The Docker runtime
+enables preloading in its default command. Allow one slot in `max_worker_processes`.
+
+Every ROS context the extension creates passes
+`--ros-args --disable-external-lib-logs`, so the server needs neither a home
+directory nor `ROS_LOG_DIR`, and no `~/.ros/log` files are written. The default
+`rcl_logging_spdlog` backend resolves its directory with `rcutils_expand_user`,
+which fails when the postmaster has no usable `HOME`; systemd units and containers
+routinely start PostgreSQL that way. rcl reports that failure as
+`RCL_LOGGING_RET_ERROR`, whose value is also `RCL_RET_TIMEOUT` (2), so the worker
+used to abort before touching DDS with the misleading
+`pg_ros2 event=observer_failed error=Timeout occurred (RCL_RET_TIMEOUT)`. ROS
+console output and the extension's own messages both reach the PostgreSQL log.
 
 ## Export an installable package
 
