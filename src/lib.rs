@@ -5,7 +5,7 @@ use rclrs::{
     Context, CreateBasicExecutor, InitOptions, IntoNodeOptions, Node, RclrsError, RclrsErrorFilter,
     SpinOptions,
 };
-use std::ffi::CString;
+use std::ffi::{CStr, CString, c_char};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -156,8 +156,36 @@ pub(crate) fn ros_context() -> Result<Context, RclrsError> {
     Context::new(args, InitOptions::default())
 }
 
+/// Name of the RMW implementation rcl resolved, for example rmw_fastrtps_cpp.
+///
+/// rclrs does not re-export this, so declare the C entry point that
+/// rmw_implementation provides and that rclrs already links.
+fn rmw_implementation() -> String {
+    unsafe extern "C" {
+        fn rmw_get_implementation_identifier() -> *const c_char;
+    }
+    // SAFETY: called after Context::new, so rcl has initialized the RMW. The
+    // result points at a static string owned by the RMW implementation.
+    unsafe {
+        let identifier = rmw_get_implementation_identifier();
+        if identifier.is_null() {
+            "unknown".to_owned()
+        } else {
+            CStr::from_ptr(identifier).to_string_lossy().into_owned()
+        }
+    }
+}
+
 fn run_observer() -> Result<(), RclrsError> {
     let context = ros_context()?;
+    // Record the DDS domain the observer actually joined. It comes from the
+    // server process environment, so a domain set only in a client shell or a
+    // docker exec is invisible here and leaves the node undiscoverable.
+    pgrx::log!(
+        "pg_ros2 event=ros_context_ready domain_id={} rmw={}",
+        context.domain_id(),
+        rmw_implementation()
+    );
     let mut executor = context.create_basic_executor();
     let name = format!("pg_ros2_worker_{}", std::process::id());
     let node = executor.create_node(
