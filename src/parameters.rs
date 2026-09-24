@@ -202,15 +202,7 @@ pub(crate) fn persist(
     previous: Option<&[Parameter]>,
     previous_extension: Option<pg_sys::Oid>,
 ) -> Option<pg_sys::Oid> {
-    let (oid, schema) = Spi::get_two::<pg_sys::Oid, String>(
-        "SELECT e.oid, pg_catalog.quote_ident(n.nspname) \
-         FROM pg_catalog.pg_extension e JOIN pg_catalog.pg_namespace n ON n.oid = e.extnamespace \
-         WHERE e.extname = 'pg_ros2'",
-    )
-    .unwrap();
-    let (Some(oid), Some(schema)) = (oid, schema) else {
-        return None;
-    };
+    let (oid, schema) = crate::installed_extension()?;
     let changed =
         snapshot.is_ok_and(|value| previous != Some(value) || previous_extension != Some(oid));
     if let Ok(parameters) = snapshot {

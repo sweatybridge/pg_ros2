@@ -242,6 +242,28 @@ fn run_observer() -> Result<(), RclrsError> {
     Ok(())
 }
 
+// A bare SELECT always produces exactly one row. The inner join this replaced
+// returns an empty tuple table when the extension is absent, which pgrx reports
+// as `SpiError::InvalidPosition`; the old caller unwrapped that into a worker
+// crash before `CREATE EXTENSION` ran. The left join keeps it a normal `None`.
+const EXTENSION_LOOKUP: &str = "\
+    SELECT e.oid, pg_catalog.quote_ident(n.nspname) \
+    FROM (SELECT 1) AS singleton \
+    LEFT JOIN pg_catalog.pg_extension e ON e.extname::text = $1 \
+    LEFT JOIN pg_catalog.pg_namespace n ON n.oid = e.extnamespace";
+
+pub(crate) fn installed_extension() -> Option<(pg_sys::Oid, String)> {
+    lookup_extension("pg_ros2")
+}
+
+fn lookup_extension(name: &str) -> Option<(pg_sys::Oid, String)> {
+    match Spi::get_two_with_args::<pg_sys::Oid, String>(EXTENSION_LOOKUP, &[name.into()]) {
+        Ok((Some(oid), Some(schema))) => Some((oid, schema)),
+        Ok(_) => None,
+        Err(error) => panic!("pg_ros2 extension lookup failed: {error}"),
+    }
+}
+
 // Called only on the PostgreSQL main thread inside a transaction. A SQL error
 // aborts that transaction and exits the worker; the postmaster restarts it.
 fn persist_snapshot(
@@ -249,15 +271,7 @@ fn persist_snapshot(
     previous: Option<&GraphSnapshot>,
     previous_extension: Option<pg_sys::Oid>,
 ) -> Option<pg_sys::Oid> {
-    let (oid, schema) = Spi::get_two::<pg_sys::Oid, String>(
-        "SELECT e.oid, pg_catalog.quote_ident(n.nspname) \
-         FROM pg_catalog.pg_extension e JOIN pg_catalog.pg_namespace n ON n.oid = e.extnamespace \
-         WHERE e.extname = 'pg_ros2'",
-    )
-    .unwrap();
-    let (Some(oid), Some(schema)) = (oid, schema) else {
-        return None;
-    };
+    let (oid, schema) = installed_extension()?;
     let changed =
         snapshot.is_ok_and(|value| previous != Some(value) || previous_extension != Some(oid));
     if let Ok(value) = snapshot {
@@ -347,6 +361,14 @@ mod tests {
         };
         persist_snapshot(Ok(&empty), Some(&first), oid);
         assert_eq!(Spi::get_one::<bool>("SELECT NOT EXISTS (SELECT FROM nodes) AND NOT EXISTS (SELECT FROM topics) AND (SELECT last_error IS NULL FROM worker_status)"), Ok(Some(true)));
+    }
+
+    // Regression: an uninstalled extension used to reach pgrx's InvalidPosition
+    // error on an empty tuple table, crashing the worker before CREATE EXTENSION.
+    #[pg_test]
+    fn test_extension_lookup_tolerates_absent_extension() {
+        assert_eq!(lookup_extension("pg_ros2_absent"), None);
+        assert!(installed_extension().is_some());
     }
 }
 
