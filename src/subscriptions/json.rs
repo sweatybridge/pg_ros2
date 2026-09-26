@@ -245,7 +245,7 @@ impl Output {
     }
 }
 
-pub(super) fn payload(
+pub(crate) fn payload(
     topic: &str,
     message_type: &str,
     sequence: u64,
