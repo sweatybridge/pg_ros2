@@ -263,8 +263,10 @@ current subscriber still publishes after that wait.
 
 The `message` argument is a JSON object whose keys are message fields. Only the
 fields present are written; absent fields keep the message type's defaults, and
-unknown fields are rejected. Scalars, strings, nested messages, fixed arrays, and
-unbounded or bounded sequences are supported, including bounded string lengths.
+unknown fields are rejected. Scalars, strings (including bounded strings), nested
+messages, fixed arrays, and unbounded sequences are supported, as are bounded
+sequences of strings or messages. Bounded sequences of primitives are rejected
+because rclrs 0.7.0 corrupts memory when it resizes them (fixed in rclrs 0.8.0).
 Byte values are integers from 0 to 255. Values that do not fit a field's type or
 array length fail the statement and publish nothing. Long-double fields are
 unsupported. A JSON `null` in a floating-point field becomes `NaN`, matching the
