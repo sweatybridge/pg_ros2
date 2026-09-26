@@ -174,23 +174,112 @@ fn sequence(slot: SequenceValueMut<'_>, value: &Value, name: &str) -> Result<()>
     Ok(())
 }
 
-/// Fill a bounded sequence.
-///
-/// rclrs 0.7.0 cannot resize a bounded sequence of primitives: its
-/// `resize_unchecked` passes a pointer to the stored reference instead of the
-/// sequence struct, which corrupts memory. rclrs 0.8.0 fixes this by passing
-/// `*self`. Reject those fields instead of writing through the bad pointer.
-/// Bounded sequences of bounded strings and of messages use a proxy and resize
-/// correctly.
 fn bounded_sequence(slot: BoundedSequenceValueMut<'_>, value: &Value, name: &str) -> Result<()> {
     let items = json_array(value, name)?;
     match slot {
+        BoundedSequenceValueMut::FloatBoundedSequence(mut slot) => {
+            resize(&mut slot, items, name)?;
+            for (element, item) in slot.as_mut_slice().iter_mut().zip(items) {
+                *element = float64(item, name)? as f32;
+            }
+        }
+        BoundedSequenceValueMut::DoubleBoundedSequence(mut slot) => {
+            resize(&mut slot, items, name)?;
+            for (element, item) in slot.as_mut_slice().iter_mut().zip(items) {
+                *element = float64(item, name)?;
+            }
+        }
+        BoundedSequenceValueMut::LongDoubleBoundedSequence(_, _) => return Err(unsupported(name)),
+        BoundedSequenceValueMut::CharBoundedSequence(mut slot) => {
+            resize(&mut slot, items, name)?;
+            for (element, item) in slot.as_mut_slice().iter_mut().zip(items) {
+                *element = integer(item, name)?;
+            }
+        }
+        BoundedSequenceValueMut::WCharBoundedSequence(mut slot) => {
+            resize(&mut slot, items, name)?;
+            for (element, item) in slot.as_mut_slice().iter_mut().zip(items) {
+                *element = integer(item, name)?;
+            }
+        }
+        BoundedSequenceValueMut::BooleanBoundedSequence(mut slot) => {
+            resize(&mut slot, items, name)?;
+            for (element, item) in slot.as_mut_slice().iter_mut().zip(items) {
+                *element = boolean(item, name)?;
+            }
+        }
+        BoundedSequenceValueMut::OctetBoundedSequence(mut slot) => {
+            resize(&mut slot, items, name)?;
+            for (element, item) in slot.as_mut_slice().iter_mut().zip(items) {
+                *element = integer(item, name)?;
+            }
+        }
+        BoundedSequenceValueMut::Uint8BoundedSequence(mut slot) => {
+            resize(&mut slot, items, name)?;
+            for (element, item) in slot.as_mut_slice().iter_mut().zip(items) {
+                *element = integer(item, name)?;
+            }
+        }
+        BoundedSequenceValueMut::Int8BoundedSequence(mut slot) => {
+            resize(&mut slot, items, name)?;
+            for (element, item) in slot.as_mut_slice().iter_mut().zip(items) {
+                *element = integer(item, name)?;
+            }
+        }
+        BoundedSequenceValueMut::Uint16BoundedSequence(mut slot) => {
+            resize(&mut slot, items, name)?;
+            for (element, item) in slot.as_mut_slice().iter_mut().zip(items) {
+                *element = integer(item, name)?;
+            }
+        }
+        BoundedSequenceValueMut::Int16BoundedSequence(mut slot) => {
+            resize(&mut slot, items, name)?;
+            for (element, item) in slot.as_mut_slice().iter_mut().zip(items) {
+                *element = integer(item, name)?;
+            }
+        }
+        BoundedSequenceValueMut::Uint32BoundedSequence(mut slot) => {
+            resize(&mut slot, items, name)?;
+            for (element, item) in slot.as_mut_slice().iter_mut().zip(items) {
+                *element = integer(item, name)?;
+            }
+        }
+        BoundedSequenceValueMut::Int32BoundedSequence(mut slot) => {
+            resize(&mut slot, items, name)?;
+            for (element, item) in slot.as_mut_slice().iter_mut().zip(items) {
+                *element = integer(item, name)?;
+            }
+        }
+        BoundedSequenceValueMut::Uint64BoundedSequence(mut slot) => {
+            resize(&mut slot, items, name)?;
+            for (element, item) in slot.as_mut_slice().iter_mut().zip(items) {
+                *element = integer(item, name)?;
+            }
+        }
+        BoundedSequenceValueMut::Int64BoundedSequence(mut slot) => {
+            resize(&mut slot, items, name)?;
+            for (element, item) in slot.as_mut_slice().iter_mut().zip(items) {
+                *element = integer(item, name)?;
+            }
+        }
+        BoundedSequenceValueMut::StringBoundedSequence(mut slot) => {
+            resize(&mut slot, items, name)?;
+            for (element, item) in slot.as_mut_slice().iter_mut().zip(items) {
+                *element = string(item, name)?.into();
+            }
+        }
         BoundedSequenceValueMut::BoundedStringBoundedSequence(mut slot) => {
             resize(&mut slot, items, name)?;
             for (element, item) in slot.as_mut_slice().iter_mut().zip(items) {
                 element
                     .try_assign(string(item, name)?)
                     .map_err(|_| format!("{name}: string exceeds its ROS bound"))?;
+            }
+        }
+        BoundedSequenceValueMut::WStringBoundedSequence(mut slot) => {
+            resize(&mut slot, items, name)?;
+            for (element, item) in slot.as_mut_slice().iter_mut().zip(items) {
+                *element = string(item, name)?.into();
             }
         }
         BoundedSequenceValueMut::BoundedWStringBoundedSequence(mut slot) => {
@@ -207,7 +296,6 @@ fn bounded_sequence(slot: BoundedSequenceValueMut<'_>, value: &Value, name: &str
                 message_view(element, item, name)?;
             }
         }
-        _ => return Err(unsupported_bounded(name)),
     }
     Ok(())
 }
@@ -404,13 +492,6 @@ fn unsupported(name: &str) -> String {
     format!("{name}: long double fields are unsupported")
 }
 
-/// rclrs 0.7.0 corrupts memory when it resizes a bounded sequence of primitives,
-/// so those fields are rejected before they are touched. Bounded sequences of
-/// bounded strings and of messages take the proxy path and are still supported.
-fn unsupported_bounded(name: &str) -> String {
-    format!("{name}: bounded sequences of primitives are not supported by rclrs 0.7.0")
-}
-
 #[cfg(any(test, feature = "pg_test"))]
 #[pgrx::pg_schema]
 mod tests {
@@ -454,23 +535,8 @@ mod tests {
     }
 
     #[pgrx::pg_test]
-    fn test_round_trip_bounded_sequences_rejected() {
-        // rclrs 0.7.0 corrupts memory when it resizes a bounded primitive
-        // sequence, so the decoder must reject the field before touching it.
-        let original =
-            DynamicMessage::new("test_msgs/msg/BoundedSequences".try_into().unwrap()).unwrap();
-        let encoded = crate::subscriptions::json::payload(
-            "/test",
-            "test_msgs/msg/BoundedSequences",
-            0,
-            &original.view(),
-        )
-        .unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&encoded).unwrap();
-        let mut decoded =
-            DynamicMessage::new("test_msgs/msg/BoundedSequences".try_into().unwrap()).unwrap();
-        let error = decode(&mut decoded, &parsed["message"]).unwrap_err();
-        assert!(error.contains("bounded sequences of primitives"), "{error}");
+    fn test_round_trip_bounded_sequences() {
+        round_trip("test_msgs/msg/BoundedSequences");
     }
 
     #[pgrx::pg_test]

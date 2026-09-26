@@ -45,11 +45,12 @@ the runtime image with the fresh library, asserting that the observer worker wai
 `CREATE EXTENSION` instead of crashing and installs a snapshot once it exists. It is a
 convenience for local Docker Desktop testing on Windows and requires no host file sharing.
 
-Use the release profile for tests and packages. rclrs 0.7.0 vendors some interfaces
-from newer ROS distributions (for example `SetLoggerLevelsResult`), whose native
-symbols do not exist in Humble. Release LTO removes these unused bindings from this
-extension. An unoptimized pgrx test build retains them and fails to load.
-Adding new message APIs requires checking their Humble compatibility explicitly.
+Use the release profile for tests and packages. rclrs 0.8.0 generates bindings for
+several ROS distributions, and some reference interfaces from newer distributions
+(for example `SetLoggerLevelsResult`) whose native symbols do not exist in Humble.
+Release LTO removes these unused bindings from this extension. An unoptimized pgrx
+test build retains them and fails to load. Adding new message APIs requires checking
+their Humble compatibility explicitly.
 
 ### Subscription benchmarks
 

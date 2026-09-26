@@ -263,10 +263,8 @@ current subscriber still publishes after that wait.
 
 The `message` argument is a JSON object whose keys are message fields. Only the
 fields present are written; absent fields keep the message type's defaults, and
-unknown fields are rejected. Scalars, strings (including bounded strings), nested
-messages, fixed arrays, and unbounded sequences are supported, as are bounded
-sequences of strings or messages. Bounded sequences of primitives are rejected
-because rclrs 0.7.0 corrupts memory when it resizes them (fixed in rclrs 0.8.0).
+unknown fields are rejected. Scalars, strings, nested messages, fixed arrays, and
+unbounded or bounded sequences are supported, including bounded string lengths.
 Byte values are integers from 0 to 255. Values that do not fit a field's type or
 array length fail the statement and publish nothing. Long-double fields are
 unsupported. A JSON `null` in a floating-point field becomes `NaN`, matching the
@@ -289,7 +287,7 @@ independent of any client environment.
 ## Build and run with Docker
 
 Targets Linux amd64 and arm64, Ubuntu 22.04, PostgreSQL 18, Rust 1.96.0, pgrx 0.19.2, and
-rclrs 0.7.0. The runtime image installs the pg_durable 0.2.8 PostgreSQL 18
+rclrs 0.8.0. The runtime image installs the pg_durable 0.2.8 PostgreSQL 18
 Debian release package from `sweatybridge/pg_durable` for the target architecture
 and enables `shared_preload_libraries=pg_ros2,pg_durable` by default. Published
 multi-architecture manifests include both amd64 and arm64 images.

@@ -1,7 +1,7 @@
 //! Read-only snapshots of remote parameter services. No PostgreSQL calls while spinning.
 use pgrx::prelude::*;
-use rclrs::vendor::rcl_interfaces::{msg::ParameterValue, srv::*};
 use rclrs::{Client, Node, Promise};
+use ros_env::rcl_interfaces::{msg::ParameterValue, srv::*};
 use serde_json::{json, Value};
 use std::time::{Duration, Instant};
 
