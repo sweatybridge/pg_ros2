@@ -237,6 +237,53 @@ PostgreSQL notification channels have **no per-channel access controls**: any us
 in the database can listen or send spoofed notifications. Use a trusted database
 for sensitive topics; restricting procedure execution does not restrict listening.
 
+## Publish ROS messages from SQL
+
+Publish one message to any installed ROS message type with either overload:
+
+```sql
+SELECT ros2.publish('/chatter', '{"data":"hello"}'::jsonb);
+SELECT ros2.publish('/chatter', 'std_msgs/msg/String', '{"data":"hello"}'::jsonb);
+```
+
+Both forms return the resolved message type. The two-argument form waits up to five
+seconds for the graph to advertise a unique type for the topic. The three-argument
+form takes the type literally and does not query the graph, so it can create a topic
+that no other node has advertised yet. The inferred form rejects a topic whose
+advertised types are ambiguous.
+
+Each call runs in the invoking backend and creates a fresh ROS context, node, and
+publisher; no background worker or preloading is required. Publishing is one-shot
+and not durable, so a canceled or interrupted statement loses its message. A fresh
+DDS participant per statement is expensive; use this for occasional commands rather
+than high-rate streaming. The publisher uses the default reliable topic QoS with a
+keep-last depth of 10. It waits up to two seconds for a matching subscription before
+sending, then spins briefly so the RMW can serialize the sample. A topic with no
+current subscriber still publishes after that wait.
+
+The `message` argument is a JSON object whose keys are message fields. Only the
+fields present are written; absent fields keep the message type's defaults, and
+unknown fields are rejected. Scalars, strings, nested messages, fixed arrays, and
+unbounded or bounded sequences are supported, including bounded string lengths.
+Byte values are integers from 0 to 255. Values that do not fit a field's type or
+array length fail the statement and publish nothing. Long-double fields are
+unsupported. A JSON `null` in a floating-point field becomes `NaN`, matching the
+subscription encoder, which writes `null` for non-finite values.
+
+Execution loads native ROS libraries and reaches the server's ROS domain, so the
+functions are revoked from `PUBLIC`. Grant them only to trusted roles:
+
+```sql
+GRANT USAGE ON SCHEMA ros2 TO ros_publisher;
+GRANT EXECUTE ON FUNCTION ros2.publish(text, jsonb) TO ros_publisher;
+GRANT EXECUTE ON FUNCTION ros2.publish(text, text, jsonb) TO ros_publisher;
+```
+
+Message type-support libraries are resolved from the database server's
+`AMENT_PREFIX_PATH`, so an unsourced server fails when it cannot resolve the
+message package. Publishing stays on the server's configured ROS domain,
+independent of any client environment.
+
 ## Build and run with Docker
 
 Targets Linux amd64 and arm64, Ubuntu 22.04, PostgreSQL 18, Rust 1.96.0, pgrx 0.19.2, and

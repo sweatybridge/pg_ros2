@@ -31,11 +31,19 @@ CALL returns, cancellation, backend reuse, permissions, and rejection of atomic 
 The smoke image also preloads pg_durable, installs it in the test database, and
 checks notification delivery from `df.start('CALL ...')` under a trusted login role
 while the submitting connection remains available.
+`scripts/publish-smoke.py` checks inferred and explicit message types, nested and
+array payloads, one-shot delivery to a live subscriber, JSON validation, strict
+NULL handling, and execution permissions.
 The pgrx tests cover
-dynamic JSON conversion of nested messages, arrays, sequences, and byte limits.
+dynamic JSON conversion of nested messages, arrays, sequences, and byte limits,
+and the inverse JSON-to-message decoding, including round trips against the encoder.
 They also cover all ROS parameter value types and parameter snapshot reconciliation.
 `scripts/parameters-smoke.py` checks initial parameter discovery, updates, declarations,
 removals, service timeouts with snapshot preservation, recovery, and node removal.
+`scripts/verify-docker.ps1` builds this checkout in the pgrx builder image and then runs
+the runtime image with the fresh library, asserting that the observer worker waits for
+`CREATE EXTENSION` instead of crashing and installs a snapshot once it exists. It is a
+convenience for local Docker Desktop testing on Windows and requires no host file sharing.
 
 Use the release profile for tests and packages. rclrs 0.7.0 vendors some interfaces
 from newer ROS distributions (for example `SetLoggerLevelsResult`), whose native
@@ -111,6 +119,15 @@ Canceling the call releases its ROS resources. SQL errors abort the current batc
 previously committed notifications remain delivered. Native ROS calls may delay
 cancellation. No background worker or persistent subscription registry is involved.
 Native DDS/rclrs reception and dynamic field views allocate before the JSON bound.
+
+`ros2.publish(topic, message)` and its explicit-type overload also run in the calling
+backend. Each call validates the name and JSON, creates an ephemeral ROS context,
+node, and dynamic publisher, optionally waits for a unique advertised type, fills a
+`DynamicMessage` from the JSON object, waits up to two seconds for a matching
+subscription, publishes once with reliable keep-last-10 QoS, and spins briefly to
+flush the sample. Nothing is persisted and no worker is involved. Validation
+failures happen before the context is created; later errors release it with the
+backend's other transaction resources.
 
 Both graph queries run outside database transactions. A complete, changed snapshot
 is written with typed SQL parameters in one short transaction. A failed read retains
