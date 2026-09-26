@@ -507,25 +507,45 @@ mod tests {
     // Encoding a decoded default message must reproduce the original JSON. The
     // encoder is the subscription payload builder, so this pins the decoder to
     // its exact field semantics for scalars, arrays, sequences, and nesting.
+    fn round_trip(kind: &str) {
+        pgrx::log!("pg_ros2 round_trip kind={kind} phase=new");
+        let original = DynamicMessage::new(kind.try_into().unwrap()).unwrap();
+        pgrx::log!("pg_ros2 round_trip kind={kind} phase=encode");
+        let encoded =
+            crate::subscriptions::json::payload("/test", kind, 0, &original.view()).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+        pgrx::log!("pg_ros2 round_trip kind={kind} phase=decode");
+        let mut decoded = DynamicMessage::new(kind.try_into().unwrap()).unwrap();
+        decode(&mut decoded, &parsed["message"]).unwrap();
+        pgrx::log!("pg_ros2 round_trip kind={kind} phase=reencode");
+        let reencoded =
+            crate::subscriptions::json::payload("/test", kind, 0, &decoded.view()).unwrap();
+        assert_eq!(encoded, reencoded, "{kind}");
+    }
+
     #[pgrx::pg_test]
-    fn test_decode_round_trips_encoded_defaults() {
-        for kind in [
-            "std_msgs/msg/String",
-            "test_msgs/msg/Arrays",
-            "test_msgs/msg/UnboundedSequences",
-            "test_msgs/msg/BoundedSequences",
-            "test_msgs/msg/Nested",
-        ] {
-            let original = DynamicMessage::new(kind.try_into().unwrap()).unwrap();
-            let encoded =
-                crate::subscriptions::json::payload("/test", kind, 0, &original.view()).unwrap();
-            let parsed: serde_json::Value = serde_json::from_str(&encoded).unwrap();
-            let mut decoded = DynamicMessage::new(kind.try_into().unwrap()).unwrap();
-            decode(&mut decoded, &parsed["message"]).unwrap();
-            let reencoded =
-                crate::subscriptions::json::payload("/test", kind, 0, &decoded.view()).unwrap();
-            assert_eq!(encoded, reencoded, "{kind}");
-        }
+    fn test_round_trip_string() {
+        round_trip("std_msgs/msg/String");
+    }
+
+    #[pgrx::pg_test]
+    fn test_round_trip_arrays() {
+        round_trip("test_msgs/msg/Arrays");
+    }
+
+    #[pgrx::pg_test]
+    fn test_round_trip_unbounded_sequences() {
+        round_trip("test_msgs/msg/UnboundedSequences");
+    }
+
+    #[pgrx::pg_test]
+    fn test_round_trip_bounded_sequences() {
+        round_trip("test_msgs/msg/BoundedSequences");
+    }
+
+    #[pgrx::pg_test]
+    fn test_round_trip_nested() {
+        round_trip("test_msgs/msg/Nested");
     }
 
     #[pgrx::pg_test]
