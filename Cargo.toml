@@ -19,7 +19,8 @@ pg_bench = ["dep:pgrx-bench"]
 [dependencies]
 pgrx = "=0.19.2"
 pgrx-bench = { version = "0.19.2", optional = true }
-rclrs = "=0.7.0"
+rclrs = "=0.8.0"
+ros-env = "0.3"
 serde_json = "1"
 
 [dev-dependencies]

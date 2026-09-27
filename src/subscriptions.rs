@@ -1,5 +1,5 @@
 //! A caller-owned ROS subscription. Each notification batch commits during CALL.
-mod json;
+pub(crate) mod json;
 
 use pgrx::prelude::*;
 use rclrs::{
@@ -53,19 +53,7 @@ fn validate_topic(topic: &str) -> Result<(), &'static str> {
     if topic.len() >= pg_sys::NAMEDATALEN as usize {
         return Err("topic exceeds PostgreSQL's 63-byte notification channel limit");
     }
-    let Some(relative) = topic.strip_prefix('/') else {
-        return Err("topic must be a fully qualified ROS name starting with '/'");
-    };
-    if relative.split('/').any(|part| {
-        let mut bytes = part.bytes();
-        !bytes
-            .next()
-            .is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_')
-            || !bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
-    }) {
-        return Err("topic must contain nonempty ROS name segments (letters, digits, underscores; no leading digits)");
-    }
-    Ok(())
+    crate::naming::validate_topic(topic)
 }
 
 fn receive(topic: &str) -> Result<(), String> {

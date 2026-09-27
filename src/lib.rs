@@ -13,7 +13,9 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
+mod naming;
 mod parameters;
+mod publish;
 mod subscriptions;
 
 ::pgrx::pg_module_magic!(name, version);
