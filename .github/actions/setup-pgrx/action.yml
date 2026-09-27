@@ -46,7 +46,22 @@ runs:
 
     - name: Install cargo-pgrx
       shell: bash
-      run: cargo install --locked cargo-pgrx
+      run: |
+        # A bare version is a caret requirement, so the pin is written as "=X.Y.Z".
+        version=$(grep -oP '^pgrx\s*=\s*"=\K[^"]+' "${GITHUB_WORKSPACE}/Cargo.toml" || true)
+        if [ -z "$version" ]; then
+          echo "::error::Could not determine the pgrx version; pin pgrx in Cargo.toml or pass the pgrx_version input."
+          exit 1
+        fi
+
+        # ~/.cargo/bin is restored from the Rust cache, so reinstall only when the
+        # cached binary is missing or was built from a different pgrx release.
+        if cargo pgrx --version 2>/dev/null | grep -qxF "cargo-pgrx $version"; then
+          echo "cargo-pgrx $version is already installed"
+        else
+          echo "Installing cargo-pgrx $version"
+          cargo install --locked --force cargo-pgrx --version "=${version}"
+        fi
 
     - name: Initialize pgrx
       shell: bash
