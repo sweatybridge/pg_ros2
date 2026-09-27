@@ -40,10 +40,10 @@ and the inverse JSON-to-message decoding, including round trips against the enco
 They also cover all ROS parameter value types and parameter snapshot reconciliation.
 `scripts/parameters-smoke.py` checks initial parameter discovery, updates, declarations,
 removals, service timeouts with snapshot preservation, recovery, and node removal.
-`scripts/verify-docker.ps1` builds this checkout in the pgrx builder image and then runs
+`scripts/verify-docker.sh` builds this checkout in the pgrx builder image and then runs
 the runtime image with the fresh library, asserting that the observer worker waits for
-`CREATE EXTENSION` instead of crashing and installs a snapshot once it exists. It is a
-convenience for local Docker Desktop testing on Windows and requires no host file sharing.
+`CREATE EXTENSION` instead of crashing and installs a snapshot once it exists. It copies
+the source into the build container with `docker cp`, so the host needs no Docker file sharing.
 
 Use the release profile for tests and packages. rclrs 0.8.0 generates bindings for
 several ROS distributions, and some reference interfaces from newer distributions
