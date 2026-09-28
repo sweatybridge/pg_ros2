@@ -4,41 +4,61 @@ use rclrs::{
 };
 use std::fmt::{self, Write};
 
-const LIMIT: usize = 7999;
-type Result<T> = std::result::Result<T, &'static str>;
+/// PostgreSQL refuses a notification payload of 8000 bytes or more, so the
+/// LISTEN/NOTIFY path encodes at most this many. Table-backed subscriptions
+/// pass their own, larger limit.
+pub(crate) const NOTIFY_LIMIT: usize = 7999;
+type Result<T> = std::result::Result<T, String>;
 
-#[derive(Default)]
-struct Output(String);
+/// A JSON writer that refuses to grow past a byte limit.
+struct Output {
+    text: String,
+    limit: usize,
+}
 
 impl Write for Output {
     fn write_str(&mut self, value: &str) -> fmt::Result {
-        if self.0.len() + value.len() > LIMIT {
+        if self.text.len() + value.len() > self.limit {
             return Err(fmt::Error);
         }
-        self.0.push_str(value);
+        self.text.push_str(value);
         Ok(())
     }
 }
 
 impl Output {
+    fn new(limit: usize) -> Self {
+        Self {
+            text: String::new(),
+            limit,
+        }
+    }
+
+    fn limit_error(limit: usize) -> String {
+        format!("encoded message exceeds the {limit} byte limit")
+    }
+
     fn push(&mut self, value: &str) -> Result<()> {
-        self.write_str(value)
-            .map_err(|_| "notification payload exceeds 7999 bytes")
+        if self.text.len() + value.len() > self.limit {
+            return Err(Self::limit_error(self.limit));
+        }
+        self.text.push_str(value);
+        Ok(())
     }
 
     fn string(&mut self, value: impl fmt::Display) -> Result<()> {
-        let mut raw = Output::default();
-        write!(raw, "{value}").map_err(|_| "notification payload exceeds 7999 bytes")?;
-        self.push(&serde_json::to_string(&raw.0).expect("string serialization"))
+        let mut raw = Output::new(self.limit);
+        write!(raw, "{value}").map_err(|_| Self::limit_error(self.limit))?;
+        self.push(&serde_json::to_string(&raw.text).expect("string serialization"))
     }
 
     fn number(&mut self, value: impl fmt::Display) -> Result<()> {
-        write!(self, "{value}").map_err(|_| "notification payload exceeds 7999 bytes")
+        write!(self, "{value}").map_err(|_| Self::limit_error(self.limit))
     }
 
     fn message(&mut self, message: &DynamicMessageView<'_>, depth: usize) -> Result<()> {
         if depth > 64 {
-            return Err("message nesting exceeds 64 levels");
+            return Err("message nesting exceeds 64 levels".to_owned());
         }
         self.push("{")?;
         for (index, (name, value)) in message.iter().enumerate() {
@@ -101,7 +121,7 @@ impl Output {
                 SimpleValue::WString(v) => self.string(v),
                 SimpleValue::BoundedWString(v) => self.string(v),
                 SimpleValue::Message(v) => self.message(&v, depth),
-                SimpleValue::LongDouble(_) => Err("long double fields are unsupported"),
+                SimpleValue::LongDouble(_) => Err("long double fields are unsupported".to_owned()),
             },
             Value::Array(value) => match value {
                 ArrayValue::FloatArray(v) => self.array(v, |out, v| {
@@ -135,7 +155,9 @@ impl Output {
                 ArrayValue::WStringArray(v) => self.array(v, |out, v| out.string(v)),
                 ArrayValue::BoundedWStringArray(v) => self.array(&v, |out, v| out.string(v)),
                 ArrayValue::MessageArray(v) => self.array(&v, |out, v| out.message(v, depth)),
-                ArrayValue::LongDoubleArray(_, _) => Err("long double fields are unsupported"),
+                ArrayValue::LongDoubleArray(_, _) => {
+                    Err("long double fields are unsupported".to_owned())
+                }
             },
             Value::Sequence(value) => match value {
                 SequenceValue::FloatSequence(v) => self.array(v, |out, v| {
@@ -169,7 +191,9 @@ impl Output {
                 SequenceValue::WStringSequence(v) => self.array(v, |out, v| out.string(v)),
                 SequenceValue::BoundedWStringSequence(v) => self.array(&v, |out, v| out.string(v)),
                 SequenceValue::MessageSequence(v) => self.array(&v, |out, v| out.message(v, depth)),
-                SequenceValue::LongDoubleSequence(_) => Err("long double fields are unsupported"),
+                SequenceValue::LongDoubleSequence(_) => {
+                    Err("long double fields are unsupported".to_owned())
+                }
             },
             Value::BoundedSequence(value) => match value {
                 BoundedSequenceValue::FloatBoundedSequence(v) => self.array(&v, |out, v| {
@@ -238,7 +262,7 @@ impl Output {
                     self.array(&v, |out, v| out.message(v, depth))
                 }
                 BoundedSequenceValue::LongDoubleBoundedSequence(_, _) => {
-                    Err("long double fields are unsupported")
+                    Err("long double fields are unsupported".to_owned())
                 }
             },
         }
@@ -250,8 +274,9 @@ pub(crate) fn payload(
     message_type: &str,
     sequence: u64,
     message: &DynamicMessageView<'_>,
+    limit: usize,
 ) -> Result<String> {
-    let mut output = Output::default();
+    let mut output = Output::new(limit);
     output.push("{\"topic\":")?;
     output.string(topic)?;
     output.push(",\"message_type\":")?;
@@ -261,7 +286,7 @@ pub(crate) fn payload(
     output.push(",\"message\":")?;
     output.message(message, 0)?;
     output.push("}")?;
-    Ok(output.0)
+    Ok(output.text)
 }
 
 #[cfg(any(test, feature = "pg_test"))]
@@ -278,7 +303,14 @@ mod tests {
         } else {
             panic!("missing string field");
         }
-        let encoded = payload("/test", "std_msgs/msg/String", 7, &message.view()).unwrap();
+        let encoded = payload(
+            "/test",
+            "std_msgs/msg/String",
+            7,
+            &message.view(),
+            NOTIFY_LIMIT,
+        )
+        .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&encoded).unwrap();
         assert_eq!(parsed["message"]["data"], "hello \"ROS\"\n世界");
         assert_eq!(parsed["sequence"], 7);
@@ -286,8 +318,14 @@ mod tests {
             *data = "x".repeat(8000).as_str().into();
         }
         assert_eq!(
-            payload("/test", "std_msgs/msg/String", 8, &message.view()),
-            Err("notification payload exceeds 7999 bytes")
+            payload(
+                "/test",
+                "std_msgs/msg/String",
+                8,
+                &message.view(),
+                NOTIFY_LIMIT
+            ),
+            Err("encoded message exceeds the 7999 byte limit".to_owned())
         );
     }
 
@@ -300,7 +338,7 @@ mod tests {
             "test_msgs/msg/Nested",
         ] {
             let message = DynamicMessage::new(kind.try_into().unwrap()).unwrap();
-            let encoded = payload("/test", kind, 0, &message.view()).unwrap();
+            let encoded = payload("/test", kind, 0, &message.view(), NOTIFY_LIMIT).unwrap();
             let parsed: serde_json::Value = serde_json::from_str(&encoded).unwrap();
             assert!(parsed["message"].is_object());
             if kind.ends_with("Sequences") {
@@ -314,25 +352,25 @@ mod tests {
                 );
             }
         }
-        let mut output = Output::default();
+        let mut output = Output::new(NOTIFY_LIMIT);
         output
             .value(Value::Array(ArrayValue::Int32Array(&[1, -2, 3])), 0)
             .unwrap();
-        assert_eq!(output.0, "[1,-2,3]");
-        let mut output = Output::default();
+        assert_eq!(output.text, "[1,-2,3]");
+        let mut output = Output::new(NOTIFY_LIMIT);
         output
             .value(Value::Simple(SimpleValue::Double(&f64::NAN)), 0)
             .unwrap();
-        assert_eq!(output.0, "null");
+        assert_eq!(output.text, "null");
     }
 
     #[pgrx::pg_test]
     fn test_output_byte_limit() {
-        let mut output = Output::default();
-        output.push(&"x".repeat(LIMIT)).unwrap();
+        let mut output = Output::new(NOTIFY_LIMIT);
+        output.push(&"x".repeat(NOTIFY_LIMIT)).unwrap();
         assert!(output.push("x").is_err());
-        assert_eq!(output.0.len(), LIMIT);
-        let mut output = Output::default();
+        assert_eq!(output.text.len(), NOTIFY_LIMIT);
+        let mut output = Output::new(NOTIFY_LIMIT);
         assert!(output.string("\n".repeat(4000)).is_err());
     }
 }

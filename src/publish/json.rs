@@ -509,13 +509,25 @@ mod tests {
     // its exact field semantics for scalars, arrays, sequences, and nesting.
     fn round_trip(kind: &str) {
         let original = DynamicMessage::new(kind.try_into().unwrap()).unwrap();
-        let encoded =
-            crate::subscriptions::json::payload("/test", kind, 0, &original.view()).unwrap();
+        let encoded = crate::subscriptions::json::payload(
+            "/test",
+            kind,
+            0,
+            &original.view(),
+            crate::subscriptions::json::NOTIFY_LIMIT,
+        )
+        .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&encoded).unwrap();
         let mut decoded = DynamicMessage::new(kind.try_into().unwrap()).unwrap();
         decode(&mut decoded, &parsed["message"]).unwrap();
-        let reencoded =
-            crate::subscriptions::json::payload("/test", kind, 0, &decoded.view()).unwrap();
+        let reencoded = crate::subscriptions::json::payload(
+            "/test",
+            kind,
+            0,
+            &decoded.view(),
+            crate::subscriptions::json::NOTIFY_LIMIT,
+        )
+        .unwrap();
         assert_eq!(encoded, reencoded, "{kind}");
     }
 

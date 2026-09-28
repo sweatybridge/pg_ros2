@@ -111,6 +111,7 @@ fn receive(topic: &str) -> Result<(), String> {
                                 &message_type,
                                 sequence.fetch_add(1, Ordering::Relaxed),
                                 &message.view(),
+                                json::NOTIFY_LIMIT,
                             );
                             if sender.try_send(payload).is_err() {
                                 dropped.fetch_add(1, Ordering::Relaxed);
@@ -162,7 +163,7 @@ fn receive(topic: &str) -> Result<(), String> {
                     topic,
                     overflow,
                     encoding_errors,
-                    last_encoding_error.unwrap_or("none")
+                    last_encoding_error.as_deref().unwrap_or("none")
                 );
             }
             encoding_errors = 0;
@@ -208,6 +209,7 @@ mod benches {
                 "std_msgs/msg/String",
                 sequence.fetch_add(1, Ordering::Relaxed),
                 &black_box(&message).view(),
+                json::NOTIFY_LIMIT,
             )
             .unwrap();
             sender.try_send(payload).unwrap();
