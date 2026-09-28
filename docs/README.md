@@ -110,6 +110,15 @@ Graph-table reads do not initialize ROS. The graph worker owns one persistent no
 and executor, spins in bounded 100 ms intervals, and uses an atomic flag to record
 graph changes. Its SPI calls execute on the PostgreSQL worker thread.
 
+The observer is rebuilt, not merely re-polled, when discovery stays empty for
+`pg_ros2.ros_reinit_after` seconds (default 30, zero disables). The worker drops
+the context, node, executor, and graph listener together and builds fresh ones, so
+a participant created before the network was usable recovers without a server
+restart. The interval doubles after each rebuild that still discovered nothing, up
+to ten minutes, and resets after a session that discovered a peer. Successful
+snapshot and parameter state carries across the rebuild, so an unchanged graph is
+not written again. Each rebuild logs `pg_ros2 event=ros_context_rebuilding`.
+
 `CALL subscribe(topic)` creates a separate ROS node in the calling backend after
 fork. It validates a non-atomic CALL context and opens SPI with `SPI_OPT_NONATOMIC`.
 Message callbacks only enqueue bounded JSON payloads. The main backend thread spins

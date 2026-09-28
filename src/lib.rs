@@ -23,6 +23,10 @@ mod subscriptions;
 static DATABASE: GucSetting<Option<CString>> =
     GucSetting::<Option<CString>>::new(Some(c"postgres"));
 
+/// Seconds a successfully discovered but empty graph may persist before the
+/// worker rebuilds its ROS context. Zero disables rebuilding.
+static ROS_REINIT_AFTER: GucSetting<i32> = GucSetting::<i32>::new(30);
+
 extension_sql!(
     r#"
 CREATE TABLE @extschema@.nodes (
@@ -77,6 +81,16 @@ pub extern "C-unwind" fn _PG_init() {
         c"Install pg_ros2 in this database. Changing it requires a server restart.",
         &DATABASE,
         GucContext::Postmaster,
+        GucFlags::default(),
+    );
+    GucRegistry::define_int_guc(
+        c"pg_ros2.ros_reinit_after",
+        c"Seconds of an empty ROS graph before the worker rebuilds its ROS context.",
+        c"A DDS participant created before the network was usable never discovers peers, so the worker rebuilds its context after this many seconds of successful but empty discovery. Zero disables rebuilding.",
+        &ROS_REINIT_AFTER,
+        0,
+        86_400,
+        GucContext::Sighup,
         GucFlags::default(),
     );
     BackgroundWorkerBuilder::new("pg_ros2 graph worker")
@@ -197,7 +211,86 @@ pub(crate) fn describe(error: &dyn Error) -> String {
     message
 }
 
+/// Longest interval between ROS context rebuilds, reached after repeated
+/// rebuilds that still discovered nothing.
+const MAX_REINIT_AFTER: Duration = Duration::from_secs(600);
+
+/// Why one ROS session ended.
+enum SessionOutcome {
+    /// The postmaster asked the worker to stop, so the worker exits.
+    Terminated,
+    /// Discovery stayed empty for the configured interval, so the caller rebuilds
+    /// the ROS context. `saw_graph` reports whether this session ever discovered
+    /// a peer, which decides how far the caller backs off.
+    Reinitialize { saw_graph: bool },
+}
+
+/// The configured rebuild interval, or `None` when rebuilding is disabled.
+fn configured_reinit_after() -> Option<Duration> {
+    let seconds = ROS_REINIT_AFTER.get();
+    if seconds > 0 {
+        Some(Duration::from_secs(seconds as u64))
+    } else {
+        None
+    }
+}
+
+/// Grow the backoff while discovery keeps coming back empty, but start over
+/// after a session that did discover peers: the network was usable then, so the
+/// next failure should be retried promptly. Re-reads the setting so turning
+/// rebuilding off takes effect without a server restart.
+fn next_reinit_after(current: Option<Duration>, saw_graph: bool) -> Option<Duration> {
+    let configured = configured_reinit_after()?;
+    if saw_graph {
+        return Some(configured);
+    }
+    match current {
+        Some(value) => Some((value * 2).min(MAX_REINIT_AFTER)),
+        None => Some(configured),
+    }
+}
+
 fn run_observer() -> Result<(), RclrsError> {
+    // This state survives a ROS context rebuild, so a graph or parameter set
+    // that did not change is not written again.
+    let mut previous: Option<GraphSnapshot> = None;
+    let mut extension_oid: Option<pg_sys::Oid> = None;
+    let mut previous_parameters: Option<Vec<parameters::Parameter>> = None;
+    let mut parameter_extension: Option<pg_sys::Oid> = None;
+    let mut reinit_after = configured_reinit_after();
+    loop {
+        match run_session(
+            &mut previous,
+            &mut extension_oid,
+            &mut previous_parameters,
+            &mut parameter_extension,
+            reinit_after,
+        )? {
+            SessionOutcome::Terminated => return Ok(()),
+            SessionOutcome::Reinitialize { saw_graph } => {
+                let blind_for = reinit_after.unwrap_or_default().as_secs();
+                reinit_after = next_reinit_after(reinit_after, saw_graph);
+                // A context created before the network was usable never joins
+                // DDS discovery, so rebuild it instead of waiting forever.
+                pgrx::log!(
+                    "pg_ros2 event=ros_context_rebuilding blind_for={}s next_after={}s",
+                    blind_for,
+                    reinit_after.unwrap_or_default().as_secs()
+                );
+            }
+        }
+    }
+}
+
+/// Run one ROS participant until PostgreSQL asks the worker to stop or until an
+/// empty graph shows that the participant never joined discovery.
+fn run_session(
+    previous: &mut Option<GraphSnapshot>,
+    extension_oid: &mut Option<pg_sys::Oid>,
+    previous_parameters: &mut Option<Vec<parameters::Parameter>>,
+    parameter_extension: &mut Option<pg_sys::Oid>,
+    reinit_after: Option<Duration>,
+) -> Result<SessionOutcome, RclrsError> {
     let context = ros_context()?;
     // Record the DDS domain the observer actually joined. It comes from the
     // server process environment, so a domain set only in a client shell or a
@@ -224,14 +317,16 @@ fn run_observer() -> Result<(), RclrsError> {
             false
         });
     let startup = Instant::now() + Duration::from_secs(1);
-    let mut previous = None;
-    let mut extension_oid = None;
     let mut last_error = None;
     let mut waiting_logged = false;
-    let mut previous_parameters = None;
-    let mut parameter_extension = None;
     let mut next_parameters = startup;
     let mut parameter_poll: Option<parameters::Poll> = None;
+    // A participant created before the network was usable can stay isolated for
+    // the worker's whole life: rclrs re-reads the graph but never rebuilds the
+    // participant. Time a successful but empty graph so the caller can replace
+    // this session.
+    let mut empty_since: Option<Instant> = None;
+    let mut saw_graph = false;
     while BackgroundWorker::wait_latch(Some(Duration::ZERO)) {
         // A timeout is the normal end of our bounded spin, not a ROS failure.
         executor
@@ -242,15 +337,18 @@ fn run_observer() -> Result<(), RclrsError> {
             let result = poll.tick();
             if !matches!(result, Ok(None)) {
                 let result = result.map(Option::unwrap);
-                parameter_extension = BackgroundWorker::transaction(|| {
+                let previous_rows = previous_parameters.as_deref();
+                let current_extension = *parameter_extension;
+                let persisted = BackgroundWorker::transaction(|| {
                     parameters::persist(
                         result.as_deref().map_err(String::as_str),
-                        previous_parameters.as_deref(),
-                        parameter_extension,
+                        previous_rows,
+                        current_extension,
                     )
                 });
+                *parameter_extension = persisted;
                 match result {
-                    Ok(snapshot) => previous_parameters = Some(snapshot),
+                    Ok(snapshot) => *previous_parameters = Some(snapshot),
                     Err(error) => {
                         pgrx::warning!("pg_ros2 event=parameter_discovery_failed error={}", error)
                     }
@@ -272,43 +370,67 @@ fn run_observer() -> Result<(), RclrsError> {
             }
         }
         let outcome = snapshot.as_ref().map_err(|_| error.as_deref().unwrap());
+        let previous_snapshot = previous.as_ref();
+        let current_extension = *extension_oid;
         let installed = BackgroundWorker::transaction(|| {
-            persist_snapshot(outcome, previous.as_ref(), extension_oid)
+            persist_snapshot(outcome, previous_snapshot, current_extension)
         });
         if installed.is_some() {
+            match &snapshot {
+                Ok(value) if value.nodes.is_empty() && value.topics.is_empty() => {
+                    if empty_since.is_none() {
+                        empty_since = Some(Instant::now());
+                    }
+                }
+                Ok(_) => {
+                    empty_since = None;
+                    saw_graph = true;
+                }
+                // A failed read keeps the last snapshot and is already reported
+                // through `last_error`; it says nothing about isolation.
+                Err(_) => empty_since = None,
+            }
             if let Ok(snapshot) = snapshot {
                 if parameter_poll.is_none() && Instant::now() >= next_parameters {
                     match parameters::Poll::start(&node, &snapshot.nodes) {
                         Ok(poll) => parameter_poll = Some(poll),
                         Err(error) => {
-                            parameter_extension = BackgroundWorker::transaction(|| {
-                                parameters::persist(
-                                    Err(&error),
-                                    previous_parameters.as_deref(),
-                                    parameter_extension,
-                                )
+                            let previous_rows = previous_parameters.as_deref();
+                            let current_extension = *parameter_extension;
+                            let persisted = BackgroundWorker::transaction(|| {
+                                parameters::persist(Err(&error), previous_rows, current_extension)
                             });
+                            *parameter_extension = persisted;
                             next_parameters = Instant::now() + Duration::from_secs(5);
                         }
                     }
                 }
-                previous = Some(snapshot);
+                *previous = Some(snapshot);
             }
             waiting_logged = false;
         } else {
-            previous = None;
-            previous_parameters = None;
-            parameter_extension = None;
+            // The extension is absent, so the cache is not readable yet. An
+            // empty graph is expected here and must not rebuild the context.
+            empty_since = None;
+            *previous = None;
+            *previous_parameters = None;
+            *parameter_extension = None;
             parameter_poll = None;
             if !waiting_logged {
                 pgrx::log!("pg_ros2 event=waiting_for_extension hint=run_CREATE_EXTENSION_pg_ros2_in_configured_database");
                 waiting_logged = true;
             }
         }
-        extension_oid = installed;
+        *extension_oid = installed;
         last_error = error;
+        // Rebuild the ROS context instead of spinning forever on a participant
+        // that never joined discovery.
+        let blind = empty_since.zip(reinit_after);
+        if blind.is_some_and(|(since, threshold)| since.elapsed() >= threshold) {
+            return Ok(SessionOutcome::Reinitialize { saw_graph });
+        }
     }
-    Ok(())
+    Ok(SessionOutcome::Terminated)
 }
 
 // A bare SELECT always produces exactly one row. The inner join this replaced

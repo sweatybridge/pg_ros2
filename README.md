@@ -11,6 +11,8 @@ Add these settings to `postgresql.conf` and restart PostgreSQL:
 ```conf
 shared_preload_libraries = 'pg_ros2'  # append to any existing libraries
 pg_ros2.database = 'postgres'
+# Rebuild the ROS context after this many seconds of an empty graph; 0 disables.
+# pg_ros2.ros_reinit_after = 30
 ```
 
 Install the extension in the configured database. Every pg_ros2 entity is
@@ -45,6 +47,15 @@ cover discovery races. Changed snapshots replace both tables in one transaction;
 unchanged snapshots leave the graph tables untouched. Readers can continue reading
 the previous committed snapshot during refresh. Discovery or SQL failures preserve
 that snapshot. Empty successful discovery removes previously observed entities.
+
+A DDS participant created before the host network was usable never joins
+discovery, so the worker rebuilds its ROS context after `pg_ros2.ros_reinit_after`
+seconds (default 30) of successful but empty discovery and logs
+`pg_ros2 event=ros_context_rebuilding`. The interval doubles after each rebuild
+that still discovered nothing, up to ten minutes, and resets after a session that
+discovered a peer. Setting the value to 0 disables rebuilding. Snapshot and
+parameter comparison state survives the rebuild, so an unchanged graph is not
+written again.
 
 The observer is excluded from `nodes`. Duplicate node names are retained; `topics`
 has one row per topic/type pair. Graph discovery is eventually consistent and does
