@@ -272,7 +272,7 @@ pub(crate) fn flush(topics: &HashMap<String, Live>) {
                 ),
                 &[
                     topic.as_str().into(),
-                    sequence.into(),
+                    (sequence as i64).into(),
                     pgrx::JsonB(value).into(),
                 ],
             )
@@ -289,9 +289,7 @@ pub(crate) fn flush(topics: &HashMap<String, Live>) {
         }
         for (topic, error) in errors {
             Spi::run_with_args(
-                &format!(
-                    "UPDATE {schema}.subscriptions SET last_error = $2 WHERE topic_name = $1"
-                ),
+                &format!("UPDATE {schema}.subscriptions SET last_error = $2 WHERE topic_name = $1"),
                 &[topic.as_str().into(), error.as_str().into()],
             )
             .unwrap();

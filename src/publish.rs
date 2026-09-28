@@ -81,7 +81,7 @@ struct PublisherSession {
 impl PublisherSession {
     fn new() -> Result<Self, String> {
         let context = crate::ros_context().map_err(|error| crate::describe(&error))?;
-        let mut executor = context.create_basic_executor();
+        let executor = context.create_basic_executor();
         let name = format!("pg_ros2_publisher_{}", std::process::id());
         let node = executor
             .create_node(
@@ -180,7 +180,9 @@ fn publish_with_session(
         .publish(dynamic)
         .map_err(|error| crate::describe(&error))?;
     flush(&mut session.executor, FLUSH)?;
-    session.publishers.insert(key, CachedPublisher { publisher });
+    session
+        .publishers
+        .insert(key, CachedPublisher { publisher });
     Ok(resolved)
 }
 

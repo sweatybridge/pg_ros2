@@ -155,7 +155,9 @@ impl Output {
                 ArrayValue::WStringArray(v) => self.array(v, |out, v| out.string(v)),
                 ArrayValue::BoundedWStringArray(v) => self.array(&v, |out, v| out.string(v)),
                 ArrayValue::MessageArray(v) => self.array(&v, |out, v| out.message(v, depth)),
-                ArrayValue::LongDoubleArray(_, _) => Err("long double fields are unsupported".to_owned()),
+                ArrayValue::LongDoubleArray(_, _) => {
+                    Err("long double fields are unsupported".to_owned())
+                }
             },
             Value::Sequence(value) => match value {
                 SequenceValue::FloatSequence(v) => self.array(v, |out, v| {
@@ -189,7 +191,9 @@ impl Output {
                 SequenceValue::WStringSequence(v) => self.array(v, |out, v| out.string(v)),
                 SequenceValue::BoundedWStringSequence(v) => self.array(&v, |out, v| out.string(v)),
                 SequenceValue::MessageSequence(v) => self.array(&v, |out, v| out.message(v, depth)),
-                SequenceValue::LongDoubleSequence(_) => Err("long double fields are unsupported".to_owned()),
+                SequenceValue::LongDoubleSequence(_) => {
+                    Err("long double fields are unsupported".to_owned())
+                }
             },
             Value::BoundedSequence(value) => match value {
                 BoundedSequenceValue::FloatBoundedSequence(v) => self.array(&v, |out, v| {
@@ -299,8 +303,14 @@ mod tests {
         } else {
             panic!("missing string field");
         }
-        let encoded =
-            payload("/test", "std_msgs/msg/String", 7, &message.view(), NOTIFY_LIMIT).unwrap();
+        let encoded = payload(
+            "/test",
+            "std_msgs/msg/String",
+            7,
+            &message.view(),
+            NOTIFY_LIMIT,
+        )
+        .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&encoded).unwrap();
         assert_eq!(parsed["message"]["data"], "hello \"ROS\"\n世界");
         assert_eq!(parsed["sequence"], 7);
@@ -308,7 +318,13 @@ mod tests {
             *data = "x".repeat(8000).as_str().into();
         }
         assert_eq!(
-            payload("/test", "std_msgs/msg/String", 8, &message.view(), NOTIFY_LIMIT),
+            payload(
+                "/test",
+                "std_msgs/msg/String",
+                8,
+                &message.view(),
+                NOTIFY_LIMIT
+            ),
             Err("encoded message exceeds the 7999 byte limit".to_owned())
         );
     }
