@@ -74,7 +74,7 @@ sourced Humble's `setup.bash`. That environment supplies `LD_LIBRARY_PATH`,
 environment; use a service wrapper that sources the ROS setup before executing
 PostgreSQL. Add `pg_ros2` to `shared_preload_libraries`, set `pg_ros2.database` to
 the target database (default `postgres`), and restart the server. The Docker runtime
-enables preloading in its default command. Allow two slots in `max_worker_processes`: one for the graph worker and one for the message worker.
+enables preloading in its default command. Allow one slot in `max_worker_processes`.
 
 Every ROS context the extension creates passes
 `--ros-args --disable-external-lib-logs`, so the server needs neither a home
@@ -142,18 +142,19 @@ sample. Nothing is persisted and no worker is involved. Validation failures happ
 before the context is created; later errors release it with the backend's other
 transaction resources.
 
-The message worker is a second background worker. It owns one ROS context, subscribes
-to every topic in `ros2.subscriptions` whose message type it can resolve, and
-upserts the newest message per topic into `ros2.messages` in a short transaction.
-It reconciles the subscription table every `pg_ros2.subscription_poll_ms` and
-writes at most every `pg_ros2.message_poll_ms`. A subscription callback only
-encodes JSON into a one-slot mailbox per topic, so memory is bounded by one message
-per topic regardless of how far behind the drain falls. An unadvertised topic, or one
-whose type support cannot be loaded, records `last_error` and is retried, so a
-missing publisher cannot stall the other topics. SQL errors abort that transaction
-and exit the worker; the postmaster restarts it after five seconds. Registration
-comes from the table, so it is re-established after a restart without replaying
-messages.
+The same worker also maintains table-backed subscriptions. It subscribes to every
+topic in `ros2.subscriptions` whose message type it can resolve, and upserts the
+newest message per topic into `ros2.messages` in a short transaction. It
+reconciles the subscription table every `pg_ros2.subscription_poll_ms` and writes
+at most every `pg_ros2.message_poll_ms`. A subscription callback only encodes
+JSON into a one-slot mailbox per topic, so memory is bounded by one message per topic
+regardless of how far behind the drain falls. An unadvertised topic, or one whose
+type support cannot be loaded, records `last_error` and is retried, so a missing
+publisher cannot stall the other topics. While at least one subscription is live the
+executor spins every `pg_ros2.message_poll_ms` instead of its usual 100 ms, so the
+tighter spin is paid only when messages are expected. Registration comes from the
+table, so a context rebuild or a worker restart re-establishes subscriptions without
+replaying messages.
 
 Both graph queries run outside database transactions. A complete, changed snapshot
 is written with typed SQL parameters in one short transaction. A failed read retains

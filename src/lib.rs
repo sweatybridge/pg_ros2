@@ -5,6 +5,7 @@ use rclrs::{
     Context, CreateBasicExecutor, InitOptions, IntoNodeOptions, Node, RclrsError, RclrsErrorFilter,
     SpinOptions,
 };
+use std::collections::HashMap;
 use std::error::Error;
 use std::ffi::{c_char, CStr, CString};
 use std::sync::{
@@ -28,13 +29,13 @@ static DATABASE: GucSetting<Option<CString>> =
 /// worker rebuilds its ROS context. Zero disables rebuilding.
 static ROS_REINIT_AFTER: GucSetting<i32> = GucSetting::<i32>::new(30);
 
-/// Milliseconds the message worker spins between writes to ros2.messages.
+/// Milliseconds the worker spins between writes to ros2.messages.
 static MESSAGE_POLL_MS: GucSetting<i32> = GucSetting::<i32>::new(10);
 /// Milliseconds between reconciliations of ros2.subscriptions.
 static SUBSCRIPTION_POLL_MS: GucSetting<i32> = GucSetting::<i32>::new(250);
-/// Largest encoded message the message worker stores in ros2.messages.
+/// Largest encoded message the worker stores in ros2.messages.
 static MESSAGE_MAX_BYTES: GucSetting<i32> = GucSetting::<i32>::new(1_048_576);
-/// Seconds without a keepalive before the message worker removes a subscription.
+/// Seconds without a keepalive before the worker removes a subscription.
 static SUBSCRIPTION_TTL: GucSetting<i32> = GucSetting::<i32>::new(0);
 
 extension_sql!(
@@ -126,7 +127,7 @@ pub extern "C-unwind" fn _PG_init() {
     );
     GucRegistry::define_int_guc(
         c"pg_ros2.message_poll_ms",
-        c"Milliseconds the message worker spins between writes to ros2.messages.",
+        c"Milliseconds the worker spins between writes to ros2.messages.",
         c"Lower values shorten the delay before a received message becomes visible. Minimum 1.",
         &MESSAGE_POLL_MS,
         1,
@@ -146,7 +147,7 @@ pub extern "C-unwind" fn _PG_init() {
     );
     GucRegistry::define_int_guc(
         c"pg_ros2.message_max_bytes",
-        c"Largest encoded message the message worker stores in ros2.messages.",
+        c"Largest encoded message the worker stores in ros2.messages.",
         c"Unlike the LISTEN/NOTIFY path, table-backed subscriptions are not limited to PostgreSQL's 8000-byte notification payload.",
         &MESSAGE_MAX_BYTES,
         1_024,
@@ -156,7 +157,7 @@ pub extern "C-unwind" fn _PG_init() {
     );
     GucRegistry::define_int_guc(
         c"pg_ros2.subscription_ttl",
-        c"Seconds without a keepalive before the message worker removes a subscription.",
+        c"Seconds without a keepalive before the worker removes a subscription.",
         c"Zero disables expiry. A workflow that stops updating keepalive_at is removed after this many seconds.",
         &SUBSCRIPTION_TTL,
         0,
@@ -167,12 +168,6 @@ pub extern "C-unwind" fn _PG_init() {
     BackgroundWorkerBuilder::new("pg_ros2 graph worker")
         .set_library("pg_ros2")
         .set_function("graph_worker_main")
-        .enable_spi_access()
-        .set_restart_time(Some(Duration::from_secs(5)))
-        .load();
-    BackgroundWorkerBuilder::new("pg_ros2 message worker")
-        .set_library("pg_ros2")
-        .set_function("message_worker_main")
         .enable_spi_access()
         .set_restart_time(Some(Duration::from_secs(5)))
         .load();
@@ -187,7 +182,7 @@ pub(crate) fn worker_database() -> String {
         .to_owned()
 }
 
-/// Milliseconds the message worker spins between writes to ros2.messages.
+/// Milliseconds the worker spins between writes to ros2.messages.
 pub(crate) fn message_poll_ms() -> i32 {
     MESSAGE_POLL_MS.get().max(1)
 }
@@ -197,7 +192,7 @@ pub(crate) fn subscription_poll_ms() -> i32 {
     SUBSCRIPTION_POLL_MS.get().max(1)
 }
 
-/// Largest encoded message the message worker stores in ros2.messages.
+/// Largest encoded message the worker stores in ros2.messages.
 pub(crate) fn message_max_bytes() -> usize {
     MESSAGE_MAX_BYTES.get().max(1) as usize
 }
@@ -320,6 +315,10 @@ pub(crate) fn describe(error: &dyn Error) -> String {
 /// rebuilds that still discovered nothing.
 const MAX_REINIT_AFTER: Duration = Duration::from_secs(600);
 
+/// Longest executor spin while only the graph is being served. With a live
+/// subscription the worker spins more tightly so that it can drain messages.
+const GRAPH_SPIN: Duration = Duration::from_millis(100);
+
 /// Why one ROS session ended.
 enum SessionOutcome {
     /// The postmaster asked the worker to stop, so the worker exits.
@@ -362,6 +361,10 @@ fn run_observer() -> Result<(), RclrsError> {
     let mut extension_oid: Option<pg_sys::Oid> = None;
     let mut previous_parameters: Option<Vec<parameters::Parameter>> = None;
     let mut parameter_extension: Option<pg_sys::Oid> = None;
+    // Table-backed subscriptions outlive a session as rows, but their ROS
+    // objects do not: run_session clears this map before it builds a new
+    // participant and re-registers from the table.
+    let mut subscriptions: HashMap<String, messages::Live> = HashMap::new();
     let mut reinit_after = configured_reinit_after();
     loop {
         match run_session(
@@ -369,6 +372,7 @@ fn run_observer() -> Result<(), RclrsError> {
             &mut extension_oid,
             &mut previous_parameters,
             &mut parameter_extension,
+            &mut subscriptions,
             reinit_after,
         )? {
             SessionOutcome::Terminated => return Ok(()),
@@ -394,8 +398,13 @@ fn run_session(
     extension_oid: &mut Option<pg_sys::Oid>,
     previous_parameters: &mut Option<Vec<parameters::Parameter>>,
     parameter_extension: &mut Option<pg_sys::Oid>,
+    subscriptions: &mut HashMap<String, messages::Live>,
     reinit_after: Option<Duration>,
 ) -> Result<SessionOutcome, RclrsError> {
+    // Drop the previous session's subscriptions before building a new
+    // participant: a live subscription keeps the old context alive, which would
+    // defeat the rebuild. The table re-registers them on the first reconcile.
+    subscriptions.clear();
     let context = ros_context()?;
     // Record the DDS domain the observer actually joined. It comes from the
     // server process environment, so a domain set only in a client shell or a
@@ -432,12 +441,32 @@ fn run_session(
     // this session.
     let mut empty_since: Option<Instant> = None;
     let mut saw_graph = false;
+    let mut next_message_flush = Instant::now();
+    let mut next_subscription_poll = Instant::now();
     while BackgroundWorker::wait_latch(Some(Duration::ZERO)) {
+        // Spin tightly only while messages are flowing: the graph alone is
+        // served well by the coarse bound, and a tight spin costs CPU.
+        let message_poll = Duration::from_millis(crate::message_poll_ms() as u64);
+        let spin = if subscriptions.is_empty() {
+            GRAPH_SPIN
+        } else {
+            message_poll.min(GRAPH_SPIN)
+        };
         // A timeout is the normal end of our bounded spin, not a ROS failure.
         executor
-            .spin(SpinOptions::new().timeout(Duration::from_millis(100)))
+            .spin(SpinOptions::new().timeout(spin))
             .timeout_ok()
             .first_error()?;
+        let now = Instant::now();
+        if !subscriptions.is_empty() && now >= next_message_flush {
+            messages::flush(subscriptions);
+            next_message_flush = Instant::now() + message_poll;
+        }
+        if now >= next_subscription_poll {
+            messages::reconcile(&node, subscriptions);
+            next_subscription_poll =
+                Instant::now() + Duration::from_millis(crate::subscription_poll_ms() as u64);
+        }
         if let Some(poll) = &mut parameter_poll {
             let result = poll.tick();
             if !matches!(result, Ok(None)) {

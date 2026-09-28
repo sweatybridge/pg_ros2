@@ -252,8 +252,8 @@ for sensitive topics; restricting procedure execution does not restrict listenin
 
 `CALL ros2.subscribe(topic)` streams through pg_notify and is limited to
 PostgreSQL's 8000-byte notification payload, which a LaserScan routinely exceeds.
-The message worker is a second, independent path that writes the newest message
-per topic into tables:
+The graph worker also maintains table-backed subscriptions, an independent path
+that writes the newest message per topic into tables:
 
 | Table | Columns |
 | --- | --- |
@@ -272,7 +272,7 @@ SELECT message FROM ros2.messages WHERE topic_name = '/scan';
 DELETE FROM ros2.subscriptions WHERE topic_name = '/scan';
 ```
 
-The message worker reconciles the table every pg_ros2.subscription_poll_ms
+The worker reconciles the table every pg_ros2.subscription_poll_ms
 (default 250 ms), resolves each topic's message type from the graph, and subscribes.
 Set `requested_type` to skip discovery; a topic that is not advertised yet, or
 whose message type cannot be loaded, records `last_error` and is retried on the
@@ -303,9 +303,11 @@ GRANT INSERT (topic_name, requested_type, keepalive_at),
       UPDATE (keepalive_at), DELETE ON ros2.subscriptions TO ros_subscriber;
 ```
 
-Both paths can subscribe to the same topic independently; they share nothing.
-Unlike `CALL ros2.subscribe`, this path requires `pg_ros2` in
-`shared_preload_libraries` and one more `max_worker_processes` slot.
+While at least one subscription is live the worker spins every pg_ros2.message_poll_ms
+instead of its usual 100 ms, so the tighter spin is paid only when messages are
+expected. Both paths can subscribe to the same topic independently; they share
+nothing. Unlike `CALL ros2.subscribe`, this path requires `pg_ros2` in
+`shared_preload_libraries`.
 
 ## Publish ROS messages from SQL
 

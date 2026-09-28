@@ -1,21 +1,16 @@
-//! Table-backed ROS subscriptions.
+//! Table-backed ROS subscriptions, driven by the graph worker.
 //!
-//! A background worker owns one ROS context and subscribes to every topic
-//! listed in ros2.subscriptions. Ordinary DML on that table is the control
-//! plane; the worker writes the newest message per topic into ros2.messages.
-//! This path is independent of the LISTEN/NOTIFY path in subscriptions.rs,
-//! which is unchanged, and it is not limited to PostgreSQL's notification
-//! payload size.
-use pgrx::bgworkers::{BackgroundWorker, SignalWakeFlags};
+//! The graph worker also subscribes to every topic listed in
+//! ros2.subscriptions. Ordinary DML on that table is the control plane; the
+//! worker writes the newest message per topic into ros2.messages. This path is
+//! independent of the LISTEN/NOTIFY path in subscriptions.rs, which is
+//! unchanged, and it is not limited to PostgreSQL's notification payload size.
+use pgrx::bgworkers::BackgroundWorker;
 use pgrx::prelude::*;
-use rclrs::{
-    CreateBasicExecutor, DynamicSubscription, IntoNodeOptions, IntoPrimitiveOptions,
-    MessageTypeName, Node, RclrsError, RclrsErrorFilter, SpinOptions,
-};
+use rclrs::{DynamicSubscription, IntoPrimitiveOptions, MessageTypeName, Node};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
 
 use crate::subscriptions::json;
 
@@ -38,71 +33,17 @@ struct Mailbox {
 }
 
 /// A live subscription and the mailbox its callback fills.
-struct Live {
+pub(crate) struct Live {
     _subscription: DynamicSubscription,
     message_type: String,
     mailbox: Arc<Mutex<Mailbox>>,
 }
 
-/// Entry point for the message worker registered in _PG_init.
-#[pg_guard]
-#[no_mangle]
-pub extern "C-unwind" fn message_worker_main(_arg: pg_sys::Datum) {
-    BackgroundWorker::attach_signal_handlers(SignalWakeFlags::SIGHUP | SignalWakeFlags::SIGTERM);
-    let database = crate::worker_database();
-    BackgroundWorker::connect_worker_to_spi(Some(database.as_str()), None);
-    BackgroundWorker::transaction(|| {
-        Spi::run(
-            "SET search_path = pg_catalog; SET lock_timeout = '2s'; SET statement_timeout = '5s'",
-        )
-        .unwrap();
-    });
-    pgrx::log!("pg_ros2 event=message_worker_started database={}", database);
-    if let Err(error) = run() {
-        pgrx::error!(
-            "pg_ros2 event=message_worker_failed error={}",
-            crate::describe(&error)
-        );
-    }
-    pgrx::log!("pg_ros2 event=message_worker_stopped");
-}
-
-fn run() -> Result<(), RclrsError> {
-    let context = crate::ros_context()?;
-    let mut executor = context.create_basic_executor();
-    let name = format!("pg_ros2_messages_{}", std::process::id());
-    let node = executor.create_node(
-        name.as_str()
-            .enable_rosout(false)
-            .start_parameter_services(false),
-    )?;
-    let mut topics: HashMap<String, Live> = HashMap::new();
-    let mut next_reconcile = Instant::now();
-    let mut next_flush = Instant::now();
-    while BackgroundWorker::wait_latch(Some(Duration::ZERO)) {
-        // Re-read the intervals so a SIGHUP reload takes effect without a
-        // worker restart.
-        let message_poll = Duration::from_millis(crate::message_poll_ms() as u64);
-        executor
-            .spin(SpinOptions::new().timeout(message_poll))
-            .timeout_ok()
-            .first_error()?;
-        let now = Instant::now();
-        if now >= next_flush {
-            flush(&topics);
-            next_flush = Instant::now() + message_poll;
-        }
-        if now >= next_reconcile {
-            reconcile(&node, &mut topics);
-            next_reconcile =
-                Instant::now() + Duration::from_millis(crate::subscription_poll_ms() as u64);
-        }
-    }
-    Ok(())
-}
-
 /// Make the live subscriptions match the table.
-fn reconcile(node: &Node, topics: &mut HashMap<String, Live>) {
+///
+/// Runs on the worker thread, between executor spins, so no callback is in
+/// flight while the map changes.
+pub(crate) fn reconcile(node: &Node, topics: &mut HashMap<String, Live>) {
     let desired = BackgroundWorker::transaction(read_desired);
     let ttl = f64::from(crate::subscription_ttl_seconds());
     let mut wanted = HashSet::with_capacity(desired.len());
@@ -207,26 +148,24 @@ fn read_desired() -> Vec<Desired> {
     let Ok(Some(pgrx::JsonB(value))) = Spi::get_one::<pgrx::JsonB>(&query) else {
         return Vec::new();
     };
-    value
-        .as_array()
-        .map(|rows| {
-            rows.iter()
-                .filter_map(|row| {
-                    Some(Desired {
-                        topic: row.get("topic")?.as_str()?.to_owned(),
-                        requested_type: row
-                            .get("requested_type")
-                            .and_then(Value::as_str)
-                            .map(str::to_owned),
-                        idle_seconds: row
-                            .get("idle_seconds")
-                            .and_then(Value::as_f64)
-                            .unwrap_or(0.0),
-                    })
-                })
-                .collect()
+    let Some(rows) = value.as_array() else {
+        return Vec::new();
+    };
+    rows.iter()
+        .filter_map(|row| {
+            Some(Desired {
+                topic: row.get("topic")?.as_str()?.to_owned(),
+                requested_type: row
+                    .get("requested_type")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                idle_seconds: row
+                    .get("idle_seconds")
+                    .and_then(Value::as_f64)
+                    .unwrap_or(0.0),
+            })
         })
-        .unwrap_or_default()
+        .collect()
 }
 
 fn subscribe(
@@ -299,7 +238,7 @@ fn resolve(node: &Node, topic: &str) -> Result<String, String> {
 }
 
 /// Write every mailbox that has something new into ros2.messages.
-fn flush(topics: &HashMap<String, Live>) {
+pub(crate) fn flush(topics: &HashMap<String, Live>) {
     let mut messages = Vec::new();
     let mut errors = Vec::new();
     for (topic, live) in topics {
