@@ -248,6 +248,65 @@ PostgreSQL notification channels have **no per-channel access controls**: any us
 in the database can listen or send spoofed notifications. Use a trusted database
 for sensitive topics; restricting procedure execution does not restrict listening.
 
+## Subscribe to ROS messages into tables
+
+`CALL ros2.subscribe(topic)` streams through pg_notify and is limited to
+PostgreSQL's 8000-byte notification payload, which a LaserScan routinely exceeds.
+The message worker is a second, independent path that writes the newest message
+per topic into tables:
+
+| Table | Columns |
+| --- | --- |
+| `subscriptions` | `topic_name`, `requested_type`, `message_type`, `registered_at`, `keepalive_at`, `last_message_at`, `last_error` |
+| `messages` | `topic_name`, `sequence`, `received_at`, `message` |
+
+The tables are the interface; this path has no subscribe or unsubscribe function.
+Register and remove a topic with ordinary DML:
+
+```sql
+INSERT INTO ros2.subscriptions (topic_name) VALUES ('/scan')
+ON CONFLICT (topic_name) DO NOTHING;
+
+SELECT message FROM ros2.messages WHERE topic_name = '/scan';
+
+DELETE FROM ros2.subscriptions WHERE topic_name = '/scan';
+```
+
+The message worker reconciles the table every pg_ros2.subscription_poll_ms
+(default 250 ms), resolves each topic's message type from the graph, and subscribes.
+Set `requested_type` to skip discovery; a topic that is not advertised yet, or
+whose message type cannot be loaded, records `last_error` and is retried on the
+next reconcile instead of failing the worker. The newest message per topic is
+upserted within pg_ros2.message_poll_ms (default 10 ms). Deleting a row stops its
+subscription and deletes its cached message.
+
+`messages` has one row per topic, so it is a last-value cache, not a stream: a
+reader sees the most recent message and older ones are replaced. Use `received_at`
+and `sequence` to tell whether a message is new. There is no replay across a
+restart, and a re-executed workflow step may read the same message twice.
+
+pg_ros2.message_max_bytes (default 1 MiB) bounds the encoded message.
+pg_ros2.subscription_ttl (default 0, disabled) removes a subscription whose
+`keepalive_at` stops advancing, which is how a cancelled workflow releases its
+subscription; keeping it fresh is the caller's job:
+
+```sql
+UPDATE ros2.subscriptions SET keepalive_at = statement_timestamp()
+WHERE topic_name = '/scan';
+```
+
+The worker loads the native ROS libraries, so users need only table privileges:
+
+```sql
+GRANT SELECT ON ros2.messages TO reader_role;
+GRANT INSERT (topic_name, requested_type, keepalive_at),
+      UPDATE (keepalive_at), DELETE ON ros2.subscriptions TO ros_subscriber;
+```
+
+Both paths can subscribe to the same topic independently; they share nothing.
+Unlike `CALL ros2.subscribe`, this path requires `pg_ros2` in
+`shared_preload_libraries` and one more `max_worker_processes` slot.
+
 ## Publish ROS messages from SQL
 
 Publish one message to any installed ROS message type with either overload:

@@ -13,6 +13,7 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
+mod messages;
 mod naming;
 mod parameters;
 mod publish;
@@ -26,6 +27,15 @@ static DATABASE: GucSetting<Option<CString>> =
 /// Seconds a successfully discovered but empty graph may persist before the
 /// worker rebuilds its ROS context. Zero disables rebuilding.
 static ROS_REINIT_AFTER: GucSetting<i32> = GucSetting::<i32>::new(30);
+
+/// Milliseconds the message worker spins between writes to ros2.messages.
+static MESSAGE_POLL_MS: GucSetting<i32> = GucSetting::<i32>::new(10);
+/// Milliseconds between reconciliations of ros2.subscriptions.
+static SUBSCRIPTION_POLL_MS: GucSetting<i32> = GucSetting::<i32>::new(250);
+/// Largest encoded message the message worker stores in ros2.messages.
+static MESSAGE_MAX_BYTES: GucSetting<i32> = GucSetting::<i32>::new(1_048_576);
+/// Seconds without a keepalive before the message worker removes a subscription.
+static SUBSCRIPTION_TTL: GucSetting<i32> = GucSetting::<i32>::new(0);
 
 extension_sql!(
     r#"
@@ -66,6 +76,27 @@ CREATE TABLE @extschema@.parameter_status (
     name = "graph_tables",
 );
 
+extension_sql!(
+    r#"
+CREATE TABLE @extschema@.subscriptions (
+    topic_name text PRIMARY KEY,
+    requested_type text,
+    message_type text,
+    registered_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+    keepalive_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+    last_message_at timestamptz,
+    last_error text
+);
+CREATE TABLE @extschema@.messages (
+    topic_name text PRIMARY KEY,
+    sequence bigint NOT NULL,
+    received_at timestamptz NOT NULL,
+    message jsonb NOT NULL
+);
+"#,
+    name = "message_tables",
+);
+
 // Register only in the postmaster; ROS must never be initialized before fork.
 #[pg_guard]
 pub extern "C-unwind" fn _PG_init() {
@@ -93,21 +124,95 @@ pub extern "C-unwind" fn _PG_init() {
         GucContext::Sighup,
         GucFlags::default(),
     );
+    GucRegistry::define_int_guc(
+        c"pg_ros2.message_poll_ms",
+        c"Milliseconds the message worker spins between writes to ros2.messages.",
+        c"Lower values shorten the delay before a received message becomes visible. Minimum 1.",
+        &MESSAGE_POLL_MS,
+        1,
+        1_000,
+        GucContext::Sighup,
+        GucFlags::default(),
+    );
+    GucRegistry::define_int_guc(
+        c"pg_ros2.subscription_poll_ms",
+        c"Milliseconds between reconciliations of ros2.subscriptions.",
+        c"An INSERT or DELETE of a subscription takes effect within this interval.",
+        &SUBSCRIPTION_POLL_MS,
+        50,
+        60_000,
+        GucContext::Sighup,
+        GucFlags::default(),
+    );
+    GucRegistry::define_int_guc(
+        c"pg_ros2.message_max_bytes",
+        c"Largest encoded message the message worker stores in ros2.messages.",
+        c"Unlike the LISTEN/NOTIFY path, table-backed subscriptions are not limited to PostgreSQL's 8000-byte notification payload.",
+        &MESSAGE_MAX_BYTES,
+        1_024,
+        134_217_728,
+        GucContext::Sighup,
+        GucFlags::default(),
+    );
+    GucRegistry::define_int_guc(
+        c"pg_ros2.subscription_ttl",
+        c"Seconds without a keepalive before the message worker removes a subscription.",
+        c"Zero disables expiry. A workflow that stops updating keepalive_at is removed after this many seconds.",
+        &SUBSCRIPTION_TTL,
+        0,
+        86_400,
+        GucContext::Sighup,
+        GucFlags::default(),
+    );
     BackgroundWorkerBuilder::new("pg_ros2 graph worker")
         .set_library("pg_ros2")
         .set_function("graph_worker_main")
         .enable_spi_access()
         .set_restart_time(Some(Duration::from_secs(5)))
         .load();
+    BackgroundWorkerBuilder::new("pg_ros2 message worker")
+        .set_library("pg_ros2")
+        .set_function("message_worker_main")
+        .enable_spi_access()
+        .set_restart_time(Some(Duration::from_secs(5)))
+        .load();
+}
+
+/// The database both background workers connect to.
+pub(crate) fn worker_database() -> String {
+    let database = DATABASE.get().expect("pg_ros2.database must be set");
+    database
+        .to_str()
+        .expect("pg_ros2.database must be UTF-8")
+        .to_owned()
+}
+
+/// Milliseconds the message worker spins between writes to ros2.messages.
+pub(crate) fn message_poll_ms() -> i32 {
+    MESSAGE_POLL_MS.get().max(1)
+}
+
+/// Milliseconds between reconciliations of ros2.subscriptions.
+pub(crate) fn subscription_poll_ms() -> i32 {
+    SUBSCRIPTION_POLL_MS.get().max(1)
+}
+
+/// Largest encoded message the message worker stores in ros2.messages.
+pub(crate) fn message_max_bytes() -> usize {
+    MESSAGE_MAX_BYTES.get().max(1) as usize
+}
+
+/// Seconds without a keepalive before a subscription is removed.
+pub(crate) fn subscription_ttl_seconds() -> i32 {
+    SUBSCRIPTION_TTL.get().max(0)
 }
 
 #[pg_guard]
 #[no_mangle]
 pub extern "C-unwind" fn graph_worker_main(_arg: pg_sys::Datum) {
     BackgroundWorker::attach_signal_handlers(SignalWakeFlags::SIGHUP | SignalWakeFlags::SIGTERM);
-    let database = DATABASE.get().expect("pg_ros2.database must be set");
-    let database = database.to_str().expect("pg_ros2.database must be UTF-8");
-    BackgroundWorker::connect_worker_to_spi(Some(database), None);
+    let database = worker_database();
+    BackgroundWorker::connect_worker_to_spi(Some(database.as_str()), None);
     BackgroundWorker::transaction(|| {
         Spi::run(
             "SET search_path = pg_catalog; SET lock_timeout = '2s'; SET statement_timeout = '5s'",

@@ -74,7 +74,7 @@ sourced Humble's `setup.bash`. That environment supplies `LD_LIBRARY_PATH`,
 environment; use a service wrapper that sources the ROS setup before executing
 PostgreSQL. Add `pg_ros2` to `shared_preload_libraries`, set `pg_ros2.database` to
 the target database (default `postgres`), and restart the server. The Docker runtime
-enables preloading in its default command. Allow one slot in `max_worker_processes`.
+enables preloading in its default command. Allow two slots in `max_worker_processes`: one for the graph worker and one for the message worker.
 
 Every ROS context the extension creates passes
 `--ros-args --disable-external-lib-logs`, so the server needs neither a home
@@ -130,14 +130,30 @@ previously committed notifications remain delivered. Native ROS calls may delay
 cancellation. No background worker or persistent subscription registry is involved.
 Native DDS/rclrs reception and dynamic field views allocate before the JSON bound.
 
-`ros2.publish(topic, message)` and its explicit-type overload also run in the calling
-backend. Each call validates the name and JSON, creates an ephemeral ROS context,
-node, and dynamic publisher, optionally waits for a unique advertised type, fills a
-`DynamicMessage` from the JSON object, waits up to two seconds for a matching
-subscription, publishes once with reliable keep-last-10 QoS, and spins briefly to
-flush the sample. Nothing is persisted and no worker is involved. Validation
-failures happen before the context is created; later errors release it with the
-backend's other transaction resources.
+`ros2.publish(topic, message)` and its explicit-type overload also run in the
+calling backend. The first publish in a backend creates a ROS context, node, and
+executor and keeps them, together with one dynamic publisher per topic and message
+type, for the rest of that backend's life. A later publish reuses them: it skips
+discovery, publisher creation, and the 100 ms post-create flush, though it still
+checks for a matching subscriber, which is one cheap rcl call once one is matched.
+Every call validates the name and JSON, fills a `DynamicMessage` from the JSON
+object, publishes once with reliable keep-last-10 QoS, and spins briefly to flush the
+sample. Nothing is persisted and no worker is involved. Validation failures happen
+before the context is created; later errors release it with the backend's other
+transaction resources.
+
+The message worker is a second background worker. It owns one ROS context, subscribes
+to every topic in `ros2.subscriptions` whose message type it can resolve, and
+upserts the newest message per topic into `ros2.messages` in a short transaction.
+It reconciles the subscription table every `pg_ros2.subscription_poll_ms` and
+writes at most every `pg_ros2.message_poll_ms`. A subscription callback only
+encodes JSON into a one-slot mailbox per topic, so memory is bounded by one message
+per topic regardless of how far behind the drain falls. An unadvertised topic, or one
+whose type support cannot be loaded, records `last_error` and is retried, so a
+missing publisher cannot stall the other topics. SQL errors abort that transaction
+and exit the worker; the postmaster restarts it after five seconds. Registration
+comes from the table, so it is re-established after a restart without replaying
+messages.
 
 Both graph queries run outside database transactions. A complete, changed snapshot
 is written with typed SQL parameters in one short transaction. A failed read retains
