@@ -414,6 +414,12 @@ fn run_session(
         context.domain_id(),
         rmw_implementation()
     );
+    pgrx::log!(
+        "pg_ros2 event=subscription_poller_ready poll_ms={} max_bytes={} ttl_seconds={}",
+        crate::subscription_poll_ms(),
+        crate::message_max_bytes(),
+        crate::subscription_ttl_seconds()
+    );
     let mut executor = context.create_basic_executor();
     let name = format!("pg_ros2_worker_{}", std::process::id());
     let node = executor.create_node(
@@ -443,6 +449,7 @@ fn run_session(
     let mut saw_graph = false;
     let mut next_message_flush = Instant::now();
     let mut next_subscription_poll = Instant::now();
+    let mut last_subscription_error: Option<String> = None;
     while BackgroundWorker::wait_latch(Some(Duration::ZERO)) {
         // Spin tightly only while messages are flowing: the graph alone is
         // served well by the coarse bound, and a tight spin costs CPU.
@@ -463,7 +470,21 @@ fn run_session(
             next_message_flush = Instant::now() + message_poll;
         }
         if now >= next_subscription_poll {
-            messages::reconcile(&node, subscriptions);
+            // Report a failed read once per change, as discovery errors are, so
+            // a broken table does not flood the log at the poll interval.
+            match messages::reconcile(&node, subscriptions) {
+                Err(error) => {
+                    if last_subscription_error.as_deref() != Some(error.as_str()) {
+                        pgrx::warning!("pg_ros2 event=subscription_read_failed error={}", error);
+                        last_subscription_error = Some(error);
+                    }
+                }
+                Ok(()) => {
+                    if last_subscription_error.take().is_some() {
+                        pgrx::log!("pg_ros2 event=subscription_read_recovered");
+                    }
+                }
+            }
             next_subscription_poll =
                 Instant::now() + Duration::from_millis(crate::subscription_poll_ms() as u64);
         }

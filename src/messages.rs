@@ -42,9 +42,12 @@ pub(crate) struct Live {
 /// Make the live subscriptions match the table.
 ///
 /// Runs on the worker thread, between executor spins, so no callback is in
-/// flight while the map changes.
-pub(crate) fn reconcile(node: &Node, topics: &mut HashMap<String, Live>) {
-    let desired = BackgroundWorker::transaction(read_desired);
+/// flight while the map changes. Returns the error when the table could not be
+/// read, in which case nothing changes: an unreadable table must not be
+/// mistaken for "no subscriptions wanted", which would drop every live
+/// subscription and its cached message.
+pub(crate) fn reconcile(node: &Node, topics: &mut HashMap<String, Live>) -> Result<(), String> {
+    let desired = BackgroundWorker::transaction(read_desired)?;
     let ttl = f64::from(crate::subscription_ttl_seconds());
     let mut wanted = HashSet::with_capacity(desired.len());
     let mut metadata = Vec::new();
@@ -66,6 +69,11 @@ pub(crate) fn reconcile(node: &Node, topics: &mut HashMap<String, Live>) {
             crate::message_max_bytes(),
         ) {
             Ok(live) => {
+                pgrx::log!(
+                    "pg_ros2 event=subscribed topic={} type={}",
+                    entry.topic,
+                    live.message_type
+                );
                 metadata.push((entry.topic.clone(), Some(live.message_type.clone()), None));
                 topics.insert(entry.topic, live);
             }
@@ -86,7 +94,7 @@ pub(crate) fn reconcile(node: &Node, topics: &mut HashMap<String, Live>) {
         keep
     });
     if metadata.is_empty() && expired.is_empty() && removed.is_empty() {
-        return;
+        return Ok(());
     }
     BackgroundWorker::transaction(|| {
         let Some((_oid, schema)) = crate::installed_extension() else {
@@ -132,11 +140,15 @@ pub(crate) fn reconcile(node: &Node, topics: &mut HashMap<String, Live>) {
             .unwrap();
         }
     });
+    Ok(())
 }
 
-fn read_desired() -> Vec<Desired> {
+/// Read the desired subscriptions, or the error when the table is unreadable.
+fn read_desired() -> Result<Vec<Desired>, String> {
     let Some((_oid, schema)) = crate::installed_extension() else {
-        return Vec::new();
+        // The extension is not installed yet. There is nothing to reconcile and
+        // that is not an error.
+        return Ok(Vec::new());
     };
     let query = format!(
         "SELECT coalesce(jsonb_agg(jsonb_build_object(\
@@ -145,13 +157,16 @@ fn read_desired() -> Vec<Desired> {
             'idle_seconds', extract(epoch from (statement_timestamp() - keepalive_at))::double precision\
         )), '[]'::jsonb) FROM {schema}.subscriptions"
     );
-    let Ok(Some(pgrx::JsonB(value))) = Spi::get_one::<pgrx::JsonB>(&query) else {
-        return Vec::new();
+    let value = match Spi::get_one::<pgrx::JsonB>(&query) {
+        Ok(Some(pgrx::JsonB(value))) => value,
+        Ok(None) => return Ok(Vec::new()),
+        Err(error) => return Err(error.to_string()),
     };
     let Some(rows) = value.as_array() else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
-    rows.iter()
+    Ok(rows
+        .iter()
         .filter_map(|row| {
             Some(Desired {
                 topic: row.get("topic")?.as_str()?.to_owned(),
@@ -165,7 +180,7 @@ fn read_desired() -> Vec<Desired> {
                     .unwrap_or(0.0),
             })
         })
-        .collect()
+        .collect())
 }
 
 fn subscribe(
