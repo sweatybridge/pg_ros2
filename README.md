@@ -264,19 +264,22 @@ The tables are the interface; this path has no subscribe or unsubscribe function
 Register and remove a topic with ordinary DML:
 
 ```sql
-INSERT INTO ros2.subscriptions (topic_name) VALUES ('/scan')
-ON CONFLICT (topic_name) DO NOTHING;
+INSERT INTO ros2.subscriptions (topic_name, requested_type)
+VALUES ('/scan', 'sensor_msgs/msg/LaserScan')
+ON CONFLICT (topic_name) DO UPDATE SET requested_type = EXCLUDED.requested_type;
 
 SELECT message FROM ros2.messages WHERE topic_name = '/scan';
 
 DELETE FROM ros2.subscriptions WHERE topic_name = '/scan';
 ```
 
-The worker reconciles the table every pg_ros2.subscription_poll_ms
-(default 250 ms), resolves each topic's message type from the graph, and subscribes.
-Set `requested_type` to skip discovery; a topic that is not advertised yet, or
-whose message type cannot be loaded, records `last_error` and is retried on the
-next reconcile instead of failing the worker. The newest message per topic is
+The worker reconciles the table every pg_ros2.subscription_poll_ms (default
+250 ms) and subscribes to each topic whose message type it can resolve. It reads
+that type from the live graph, so a topic nothing is advertising yet cannot be
+subscribed until a publisher appears; setting `requested_type` (as above)
+subscribes before one exists. A topic that is not advertised, or whose message
+type cannot be loaded, records `last_error` and is retried on the next
+reconcile instead of failing the worker. The newest message per topic is
 upserted within pg_ros2.message_poll_ms (default 10 ms). Deleting a row stops its
 subscription and deletes its cached message.
 
@@ -284,6 +287,13 @@ subscription and deletes its cached message.
 reader sees the most recent message and older ones are replaced. Use `received_at`
 and `sequence` to tell whether a message is new. There is no replay across a
 restart, and a re-executed workflow step may read the same message twice.
+
+If messages stays empty, check ros2.subscriptions first: last_error names the
+reason (usually a topic that is not advertised yet) and message_type shows
+whether the subscription exists. If both are null the worker is not seeing the
+row, so confirm that pg_ros2.database names the database you inserted into and
+look for pg_ros2 event=subscription_poller_ready and event=subscribed in the
+server log.
 
 pg_ros2.message_max_bytes (default 1 MiB) bounds the encoded message.
 pg_ros2.subscription_ttl (default 0, disabled) removes a subscription whose
